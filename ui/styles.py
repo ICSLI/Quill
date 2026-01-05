@@ -160,6 +160,17 @@ QLabel#subtitleLabel {
     color: #858585;
 }
 
+QLabel#iconContainer {
+    background-color: #2d2d30;
+    border-radius: 8px;
+}
+
+QLabel#previewLabel {
+    color: #d4d4d4;
+    font-size: 13px;
+    font-weight: 500;
+}
+
 /* 그룹 박스 */
 QGroupBox {
     border: 1px solid #3e3e42;

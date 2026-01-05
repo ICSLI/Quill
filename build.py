@@ -64,6 +64,7 @@ def build_exe():
         # 데이터 파일 포함
         "--add-data=resources/default_prompts.json;resources",
         "--add-data=resources/icon.ico;resources",
+        "--add-data=resources/icon_alpha.ico;resources",
 
         # PySide6 완전 포함 (필수!)
         "--collect-submodules=PySide6.QtCore",

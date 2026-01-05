@@ -6,12 +6,13 @@
 """
 
 import logging
+from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QTextEdit, QLabel, QFrame
 )
 from PySide6.QtCore import Qt, Signal, QEvent
-from PySide6.QtGui import QKeyEvent, QCursor, QScreen
+from PySide6.QtGui import QKeyEvent, QCursor, QScreen, QIcon
 
 from ui.styles import apply_dark_theme
 
@@ -45,15 +46,40 @@ class PopupWindow(QWidget):
 
     def _setup_ui(self):
         """UI 구성"""
+        # 팝업 너비 고정
+        self.setFixedWidth(280)
+
         layout = QVBoxLayout()
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        # 타이틀
-        title_label = QLabel("Quill")
-        title_label.setObjectName("titleLabel")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title_label)
+        # 헤더 섹션 (아이콘 + 텍스트 미리보기)
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(10)
+
+        # 아이콘 컨테이너 (36x36 아이콘)
+        self.icon_container = QLabel()
+        self.icon_container.setObjectName("iconContainer")
+        self.icon_container.setFixedSize(40, 40)
+        self.icon_container.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._load_icon()
+        header_layout.addWidget(self.icon_container)
+
+        # 텍스트 정보 섹션
+        text_info_layout = QVBoxLayout()
+        text_info_layout.setSpacing(2)
+
+        # 미리보기 라벨
+        self.preview_label = QLabel("Select text to process")
+        self.preview_label.setObjectName("previewLabel")
+        text_info_layout.addWidget(self.preview_label)
+
+        self.char_count_label = QLabel("0 characters")
+        self.char_count_label.setObjectName("subtitleLabel")
+        text_info_layout.addWidget(self.char_count_label)
+
+        header_layout.addLayout(text_info_layout, 1)  # stretch=1
+        layout.addLayout(header_layout)
 
         # 구분선
         separator = QFrame()
@@ -152,6 +178,87 @@ class PopupWindow(QWidget):
         else:
             super().keyPressEvent(event)
 
+    def _load_icon(self):
+        """아이콘 로드 및 설정"""
+        from PySide6.QtCore import QSize
+
+        project_root = Path(__file__).parent.parent
+
+        # 아이콘 파일 경로 (우선순위: icon_alpha.ico > icon.ico)
+        icon_paths = [
+            project_root / "resources" / "icon_alpha.ico",
+            project_root / "resources" / "icon.ico",
+            project_root / "_internal" / "resources" / "icon_alpha.ico",
+            project_root / "_internal" / "resources" / "icon.ico",
+        ]
+
+        target_size = 36  # 40x40 컨테이너에 맞게 크기 조정
+
+        for icon_path in icon_paths:
+            if icon_path.exists():
+                # QIcon을 사용하면 ICO 파일에서 적절한 크기를 선택함
+                icon = QIcon(str(icon_path))
+                if not icon.isNull():
+                    # 64x64에서 36x36로 스케일 다운 (더 선명함)
+                    pixmap = icon.pixmap(QSize(64, 64))
+                    if not pixmap.isNull():
+                        scaled_pixmap = pixmap.scaled(
+                            target_size, target_size,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation
+                        )
+                        self.icon_container.setPixmap(scaled_pixmap)
+                        logger.debug(f"Loaded icon from: {icon_path}")
+                        return
+
+        logger.warning("Could not load icon for popup header")
+
+    def _update_preview(self, text: str):
+        """텍스트 미리보기 업데이트"""
+        if not text:
+            self.preview_label.setText("Select text to process")
+            self.char_count_label.setText("0 characters")
+            return
+
+        # 글자수 표시 (전체 텍스트 길이)
+        char_count = len(text)
+        if char_count == 1:
+            self.char_count_label.setText("1 character")
+        else:
+            self.char_count_label.setText(f"{char_count} characters")
+
+        # 성능 최적화: 먼저 앞부분만 추출 (최대 50자면 충분)
+        preview_source = text[:50]
+
+        # 줄바꿈을 공백으로 변환
+        clean_text = preview_source.replace('\n', ' ').replace('\r', '')
+
+        # QFontMetrics로 수동 truncate (elidedText가 CJK에서 부정확함)
+        from PySide6.QtGui import QFontMetrics
+        fm = QFontMetrics(self.preview_label.font())
+
+        # 사용 가능한 너비 (팝업 280 - 마진 24 - 아이콘 40 - 간격 10 = 206, 여유분 16px)
+        max_width = 190
+
+        # 글자 단위로 truncate
+        ellipsis = "..."
+        ellipsis_width = fm.horizontalAdvance(ellipsis)
+        quote_width = fm.horizontalAdvance('""')
+
+        truncated = clean_text
+        while fm.horizontalAdvance(truncated) + quote_width > max_width and len(truncated) > 0:
+            truncated = truncated[:-1]
+
+        # 원본 텍스트가 truncated보다 길면 말줄임표 추가
+        if len(text) > len(truncated):
+            # 말줄임표 공간 확보
+            while fm.horizontalAdvance(truncated) + quote_width + ellipsis_width > max_width and len(truncated) > 0:
+                truncated = truncated[:-1]
+            preview_text = f'"{truncated}..."'
+        else:
+            preview_text = f'"{truncated}"'
+
+        self.preview_label.setText(preview_text)
 
     def show_at_position(self, x: int, y: int, text: str):
         """
@@ -163,6 +270,9 @@ class PopupWindow(QWidget):
             text: 선택된 텍스트
         """
         self.selected_text = text
+
+        # 텍스트 미리보기 업데이트
+        self._update_preview(text)
 
         # 위젯 크기 조정
         self.adjustSize()

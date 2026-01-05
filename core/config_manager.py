@@ -59,7 +59,8 @@ class ConfigManager:
         설정 파일이 존재하고 유효한지 확인
 
         Returns:
-            설정 파일이 존재하고 API 키가 설정되어 있으면 True
+            설정 파일이 존재하고 필수 설정(base_url, model)이 있으면 True
+            (API 키는 선택사항이므로 검사하지 않음)
         """
         if not self.config_path.exists():
             logger.debug("Config file does not exist")
@@ -67,9 +68,11 @@ class ConfigManager:
 
         try:
             config = self.load()
-            api_key_encrypted = config.get("api", {}).get("api_key_encrypted", "")
-            is_valid = bool(api_key_encrypted)
-            logger.debug(f"Config file exists, API key configured: {is_valid}")
+            api_config = config.get("api", {})
+            base_url = api_config.get("base_url", "")
+            model = api_config.get("model", "")
+            is_valid = bool(base_url and model)
+            logger.debug(f"Config file exists, configured: {is_valid} (base_url={bool(base_url)}, model={bool(model)})")
             return is_valid
         except Exception as e:
             logger.error(f"Error checking configuration: {e}")

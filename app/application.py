@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
-from PySide6.QtCore import Slot, Signal, QObject
+from PySide6.QtCore import Slot, Signal
 from PySide6.QtGui import QIcon
 
 # Core modules
