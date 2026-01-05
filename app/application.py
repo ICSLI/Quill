@@ -109,7 +109,14 @@ class QuillApp(QApplication):
         """온보딩 창 표시"""
         self.onboarding_window = OnboardingWindow()
         self.onboarding_window.setup_completed.connect(self._on_onboarding_completed)
+        self.onboarding_window.rejected.connect(self._on_onboarding_cancelled)
         self.onboarding_window.show()
+
+    @Slot()
+    def _on_onboarding_cancelled(self):
+        """온보딩 취소 시 앱 종료"""
+        logger.info("Onboarding cancelled, quitting application")
+        self.quit()
 
     @Slot(str, str, str)
     def _on_onboarding_completed(self, base_url: str, api_key: str, model: str):

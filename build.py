@@ -58,11 +58,12 @@ def build_exe():
         "--name=Quill",                   # 실행 파일 이름
         "--clean",                        # 빌드 전 캐시 정리
 
-        # 아이콘 (있으면)
-        # "--icon=resources/icon.ico",
+        # 아이콘
+        "--icon=resources/icon.ico",
 
         # 데이터 파일 포함
         "--add-data=resources/default_prompts.json;resources",
+        "--add-data=resources/icon.ico;resources",
 
         # PySide6 완전 포함 (필수!)
         "--collect-submodules=PySide6.QtCore",
