@@ -1,0 +1,27 @@
+{
+  "grammar_check": {
+    "name": "Grammar Check",
+    "template": "<|im_start|>user\nYou are a grammar correction assistant.\n\nCorrect all grammatical errors, spelling mistakes, and punctuation issues in the text within <text> tags.\n\nRules:\n- Preserve the original meaning, tone, and structure\n- Do not add, remove, or rephrase content beyond corrections\n- If no errors exist, return the text unchanged\n- Respond in the same language as <text>\n- Return ONLY the corrected text, without any prefixes or meta-commentary\n\n<text>\n{{text}}\n</text>\n<|im_end|>",
+    "temperature": 0.3
+  },
+  "rewrite": {
+    "name": "Rewrite",
+    "template": "<|im_start|>user\nYou are a professional editor.\n\nRewrite the text within <text> tags to improve clarity, readability, and flow while preserving the core meaning.\n\nRules:\n- Maintain the original intent and key information\n- Keep similar length\n- Respond in the same language as <text>\n- Return ONLY the rewritten text, without any prefixes or meta-commentary\n\n<text>\n{{text}}\n</text>\n<|im_end|>",
+    "temperature": 0.7
+  },
+  "summarize": {
+    "name": "Summarize",
+    "template": "<|im_start|>user\nYou are a summarization specialist.\n\nSummarize the text within <text> tags, capturing only the essential points.\n\nRules:\n- Be concise while including all key information\n- Write in continuous prose, not bullet points\n- Respond in the same language as <text>\n- Return ONLY the summary, without any prefixes or meta-commentary\n\n<text>\n{{text}}\n</text>\n<|im_end|>",
+    "temperature": 0.5
+  },
+  "translate": {
+    "name": "Translate",
+    "template": "<|im_start|>user\nYou are a professional translator.\n\nTranslate the text within <text> tags into English.\n\nRules:\n- Preserve the original meaning, tone, and structure\n- Keep proper nouns unchanged unless they have standard translations\n- Adapt idioms naturally for the target language\n- Return ONLY the translation, without any prefixes or meta-commentary\n\n<text>\n{{text}}\n</text>\n<|im_end|>",
+    "temperature": 0.3
+  },
+  "custom": {
+    "name": "Custom",
+    "template": "<|im_start|>user\nYou are a text processing assistant.\n\nApply the instruction within <instruction> tags to the text within <text> tags.\n\n<instruction>\n{{instruction}}\n</instruction>\n\nRules:\n- Apply the instruction ONLY to the content within <text> tags\n- Return ONLY the result, without any prefixes or meta-commentary\n\n<text>\n{{text}}\n</text>\n<|im_end|>",
+    "temperature": 0.7
+  }
+}
