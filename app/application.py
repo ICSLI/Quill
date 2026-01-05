@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import Slot, Signal, QObject
+from PySide6.QtGui import QIcon
 
 # Core modules
 from core.config_manager import ConfigManager
@@ -48,6 +49,9 @@ class QuillApp(QApplication):
         # 마지막 창이 닫혀도 앱 종료 안 함 (트레이 앱)
         self.setQuitOnLastWindowClosed(False)
 
+        # 애플리케이션 아이콘 설정 (타이틀바, 태스크바)
+        self._set_app_icon()
+
         logger.info("Quill application starting...")
 
         # 매니저 초기화
@@ -82,6 +86,22 @@ class QuillApp(QApplication):
         else:
             logger.info("Configuration found, starting application")
             self._start_app()
+
+    def _set_app_icon(self):
+        """애플리케이션 아이콘 설정"""
+        # 아이콘 경로 찾기
+        project_root = Path(__file__).parent.parent
+        icon_path = project_root / "resources" / "icon.ico"
+
+        # PyInstaller 빌드 환경에서는 _internal 폴더 확인
+        if not icon_path.exists():
+            icon_path = project_root / "_internal" / "resources" / "icon.ico"
+
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+            logger.debug(f"Application icon set: {icon_path}")
+        else:
+            logger.warning(f"Icon file not found: {icon_path}")
 
     def _connect_signals(self):
         """Signal/Slot 연결"""
