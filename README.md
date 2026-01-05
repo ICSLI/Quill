@@ -51,9 +51,9 @@ On first launch, you'll see the onboarding window:
 
 | Provider | Base URL | Model |
 |----------|----------|-------|
-| OpenAI | `https://api.openai.com/v1` | `gpt-4`, `gpt-3.5-turbo` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-5.1-2025-11-13` |
 | Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | `gemini-2.0-flash` |
-| Ollama | `http://localhost:11434/v1` | `llama3.1`, `mistral` |
+| Ollama | `http://localhost:11434/v1` | `gemma3` |
 | llama.cpp | `http://localhost:8080/v1` | (your loaded model) |
 
 ## 📖 Usage
