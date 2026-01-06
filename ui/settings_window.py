@@ -452,11 +452,19 @@ class SettingsWindow(QDialog):
                 )
                 return
 
-            # 확인 대화상자
+            # 확인 대화상자 (표시 이름 사용, 긴 이름은 픽셀 기반 truncate)
+            prompt_name = self.prompt_combo.currentText()
+            max_width = 80
+            fm = self.fontMetrics()
+            if fm.horizontalAdvance(prompt_name) > max_width:
+                while fm.horizontalAdvance(prompt_name + "...") > max_width and len(prompt_name) > 0:
+                    prompt_name = prompt_name[:-1]
+                prompt_name = prompt_name + "..."
+
             reply = QMessageBox.question(
                 self,
                 "Reset to Default",
-                f"Reset '{prompt_key}' to default?\n\nThis will discard your changes.",
+                f"Reset '{prompt_name}' to default?\n\nThis will discard your changes.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
 
