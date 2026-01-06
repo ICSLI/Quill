@@ -12,8 +12,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QTabWidget, QWidget, QComboBox,
     QTextEdit
 )
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtCore import Signal
 
 from ui.styles import apply_dark_theme
 
@@ -263,28 +262,39 @@ class SettingsWindow(QDialog):
         self.prompt_temp_edit.setPlaceholderText("e.g., 0.7")
         prompts_layout.addRow("Temperature:", self.prompt_temp_edit)
 
-        # 템플릿 보기 (읽기 전용)
-        self.prompt_template_view = QTextEdit()
-        self.prompt_template_view.setReadOnly(True)
-        self.prompt_template_view.setMaximumHeight(120)
-        prompts_layout.addRow("Template:", self.prompt_template_view)
+        # 템플릿 편집
+        self.prompt_template_edit = QTextEdit()
+        self.prompt_template_edit.setMinimumHeight(150)
+        prompts_layout.addRow("Template:", self.prompt_template_edit)
 
         prompts_group.setLayout(prompts_layout)
         layout.addWidget(prompts_group)
 
         # 도움말
         help_label = QLabel(
-            "Edit prompt names and temperatures.\n"
+            "Use {{text}} and {{instruction}} as variables.\n"
             "Custom prompt name cannot be changed."
         )
         help_label.setObjectName("subtitleLabel")
         help_label.setWordWrap(True)
         layout.addWidget(help_label)
 
-        # Save Changes 버튼
-        self.btn_save_prompt = QPushButton("Save Changes")
-        self.btn_save_prompt.clicked.connect(self._on_save_prompt)
-        layout.addWidget(self.btn_save_prompt)
+        # 버튼 레이아웃
+        prompt_btn_layout = QHBoxLayout()
+
+        # Reset to Default 버튼
+        self.btn_reset_prompt = QPushButton("Reset to Default")
+        self.btn_reset_prompt.clicked.connect(self._on_reset_prompt)
+        prompt_btn_layout.addWidget(self.btn_reset_prompt)
+
+        prompt_btn_layout.addStretch()
+
+        # Apply Changes 버튼
+        self.btn_apply_prompt = QPushButton("Apply Changes")
+        self.btn_apply_prompt.clicked.connect(self._on_apply_prompt)
+        prompt_btn_layout.addWidget(self.btn_apply_prompt)
+
+        layout.addLayout(prompt_btn_layout)
 
         layout.addStretch()
 
@@ -325,7 +335,7 @@ class SettingsWindow(QDialog):
                 # Populate edit fields
                 self.prompt_name_edit.setText(prompt.get("name", ""))
                 self.prompt_temp_edit.setText(str(prompt.get("temperature", 0.7)))
-                self.prompt_template_view.setPlainText(prompt.get("template", ""))
+                self.prompt_template_edit.setPlainText(prompt.get("template", ""))
 
                 # Disable name editing for "custom" prompt
                 is_custom = (prompt_key == "custom")
@@ -334,22 +344,52 @@ class SettingsWindow(QDialog):
         except Exception as e:
             logger.error(f"Error displaying prompt: {e}")
 
-    def _on_save_prompt(self):
-        """Save Changes 버튼 클릭 시"""
-        if not self.prompt_manager:
+    def _on_apply_prompt(self):
+        """Apply Changes 버튼 클릭 시 - 현재 프롬프트 저장"""
+        if not self._save_current_prompt():
             return
+
+        QMessageBox.information(
+            self,
+            "Applied",
+            "Prompt changes applied."
+        )
+
+    def _save_current_prompt(self) -> bool:
+        """현재 프롬프트 저장 (검증 포함). 성공 시 True 반환."""
+        if not self.prompt_manager:
+            return True  # prompt_manager 없으면 그냥 통과
 
         try:
             # Get current selected prompt
             current_index = self.prompt_combo.currentIndex()
             if current_index < 0:
-                return
+                return True  # 선택된 프롬프트 없으면 통과
 
             prompt_key = self.prompt_combo.itemData(current_index)
 
             # Get new values
             new_name = self.prompt_name_edit.text().strip()
             temp_str = self.prompt_temp_edit.text().strip()
+            new_template = self.prompt_template_edit.toPlainText()
+
+            # Validate name
+            if not new_name and prompt_key != "custom":
+                QMessageBox.warning(
+                    self,
+                    "Invalid Name",
+                    "Prompt name cannot be empty."
+                )
+                return False
+
+            # Validate template
+            if not new_template.strip():
+                QMessageBox.warning(
+                    self,
+                    "Invalid Template",
+                    "Template cannot be empty."
+                )
+                return False
 
             # Validate and parse temperature
             try:
@@ -362,12 +402,13 @@ class SettingsWindow(QDialog):
                     "Invalid Temperature",
                     f"Please enter a valid temperature value (0.0 - 2.0).\n{e}"
                 )
-                return
+                return False
 
             # Update prompt
             self.prompt_manager.update_prompt(
                 prompt_key,
                 name=new_name if prompt_key != "custom" else None,
+                template=new_template,
                 temperature=new_temp
             )
 
@@ -378,13 +419,8 @@ class SettingsWindow(QDialog):
             if prompt_key != "custom" and new_name:
                 self.prompt_combo.setItemText(current_index, new_name)
 
-            logger.info(f"Prompt {prompt_key} updated successfully")
-
-            QMessageBox.information(
-                self,
-                "Saved",
-                "Prompt changes saved successfully."
-            )
+            logger.info(f"Prompt {prompt_key} saved successfully")
+            return True
 
         except Exception as e:
             logger.error(f"Error saving prompt: {e}")
@@ -392,6 +428,68 @@ class SettingsWindow(QDialog):
                 self,
                 "Error",
                 f"Failed to save prompt: {e}"
+            )
+            return False
+
+    def _on_reset_prompt(self):
+        """Reset to Default 버튼 클릭 시"""
+        if not self.prompt_manager:
+            return
+
+        try:
+            current_index = self.prompt_combo.currentIndex()
+            if current_index < 0:
+                return
+
+            prompt_key = self.prompt_combo.itemData(current_index)
+
+            # 기본 프롬프트에 없는 경우 (사용자 추가 프롬프트)
+            if prompt_key not in self.prompt_manager.default_prompts:
+                QMessageBox.warning(
+                    self,
+                    "Cannot Reset",
+                    "This is a custom prompt without a default version."
+                )
+                return
+
+            # 확인 대화상자
+            reply = QMessageBox.question(
+                self,
+                "Reset to Default",
+                f"Reset '{prompt_key}' to default?\n\nThis will discard your changes.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+            # 기본값으로 리셋
+            self.prompt_manager.reset_prompt(prompt_key)
+            self.prompt_manager.save()
+
+            # UI 업데이트
+            default_prompt = self.prompt_manager.default_prompts[prompt_key]
+            self.prompt_name_edit.setText(default_prompt.get("name", ""))
+            self.prompt_temp_edit.setText(str(default_prompt.get("temperature", 0.7)))
+            self.prompt_template_edit.setPlainText(default_prompt.get("template", ""))
+
+            # 콤보박스 이름 업데이트
+            self.prompt_combo.setItemText(current_index, default_prompt.get("name", prompt_key))
+
+            logger.info(f"Prompt {prompt_key} reset to default")
+
+            QMessageBox.information(
+                self,
+                "Reset Complete",
+                "Prompt has been reset to default."
+            )
+
+        except Exception as e:
+            logger.error(f"Error resetting prompt: {e}")
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to reset prompt: {e}"
             )
 
     def _load_current_settings(self):
@@ -429,42 +527,13 @@ class SettingsWindow(QDialog):
                 f"Failed to load settings: {e}"
             )
 
-    def _test_connection(self):
-        """API 연결 테스트"""
-        base_url = self.input_base_url.text().strip()
-        api_key = self.input_api_key.text().strip()
-        model = self.input_model.text().strip()
-
-        if not base_url or not model:
-            QMessageBox.warning(
-                self,
-                "Invalid Input",
-                "Please fill in Base URL and Model."
-            )
-            return
-
-        # API 키가 비어있으면 기존 키 사용
-        if not api_key:
-            try:
-                api_key = self.config_manager.get_api_key()
-            except Exception as e:
-                QMessageBox.warning(
-                    self,
-                    "No API Key",
-                    "No API key found. Please enter an API key."
-                )
-                return
-
-        # 연결 테스트 (실제 구현은 나중에)
-        QMessageBox.information(
-            self,
-            "Test Connection",
-            "Connection test feature will be implemented with the main application."
-        )
-
     def _on_save(self):
         """저장 버튼 클릭 시"""
         try:
+            # 프롬프트 저장 (Prompts 탭이 있는 경우)
+            if self.prompt_manager and not self._save_current_prompt():
+                return
+
             # API 설정 저장
             base_url = self.input_base_url.text().strip()
             api_key = self.input_api_key.text().strip()

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QGroupBox, QFormLayout,
     QMessageBox
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 
 from ui.styles import apply_dark_theme
 

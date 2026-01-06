@@ -5,7 +5,7 @@ pynput을 사용하여 Windows 전역 핫키를 감지합니다.
 """
 
 import logging
-from typing import Optional, Callable
+from typing import Optional
 from PySide6.QtCore import QObject, Signal
 
 from pynput import keyboard

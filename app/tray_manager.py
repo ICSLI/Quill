@@ -6,7 +6,7 @@ Windows 시스템 트레이 아이콘과 메뉴를 관리합니다.
 
 import logging
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional
 
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QFont

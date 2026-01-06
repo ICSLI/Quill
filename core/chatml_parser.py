@@ -7,7 +7,7 @@ ChatML 형식 (<|im_start|>role...content...<|im_end|>)을 OpenAI messages 형�
 
 import re
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict
 
 
 logger = logging.getLogger(__name__)
