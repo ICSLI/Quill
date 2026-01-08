@@ -271,6 +271,9 @@ class PopupWindow(QWidget):
         """
         self.selected_text = text
 
+        # 입력칸 초기화 (이전 입력 제거)
+        self.prompt_input.clear()
+
         # 텍스트 미리보기 업데이트
         self._update_preview(text)
 

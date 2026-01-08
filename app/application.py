@@ -194,6 +194,9 @@ class QuillApp(QApplication):
             self.tray_manager.create_tray_icon()
             # 시작 알림 제거 (조용한 시작)
 
+            # 팝업 윈도우 미리 생성 (첫 호출 지연 방지)
+            self._create_popup_window()
+
             logger.info("Quill application started successfully")
 
         except Exception as e:
@@ -226,6 +229,15 @@ class QuillApp(QApplication):
 
         # 참고: 텍스트가 추출되면 _on_text_extracted()가 호출됨
 
+    def _create_popup_window(self):
+        """팝업 윈도우 생성 (재사용을 위해 미리 생성)"""
+        if self.popup_window is not None:
+            return
+
+        self.popup_window = PopupWindow()
+        self.popup_window.action_requested.connect(self._on_action_requested)
+        logger.debug("Popup window pre-created")
+
     @Slot(str)
     def _on_text_extracted(self, text: str):
         """
@@ -241,19 +253,9 @@ class QuillApp(QApplication):
         logger.info(f"Text extracted (length: {len(text)})")
         self.current_text = text
 
-        # 기존 팝업 정리 (signal disconnect 포함)
-        if self.popup_window is not None:
-            try:
-                self.popup_window.action_requested.disconnect(self._on_action_requested)
-            except RuntimeError:
-                pass  # 이미 연결 해제됨
-            self.popup_window.close()
-            self.popup_window.deleteLater()
-            self.popup_window = None
-
-        # 팝업 윈도우 생성
-        self.popup_window = PopupWindow()
-        self.popup_window.action_requested.connect(self._on_action_requested)
+        # 팝업이 없으면 생성 (앱 시작 시 생성되지 않은 경우 대비)
+        if self.popup_window is None:
+            self._create_popup_window()
 
         # 마우스 위치에 팝업 표시
         from PySide6.QtGui import QCursor
