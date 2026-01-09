@@ -125,6 +125,13 @@ class TextProcessor(QObject):
         self._thread: Optional[QThread] = None
         self._worker: Optional[TextWorker] = None
         self._lock = threading.Lock()
+
+        # 워밍업: 클립보드 접근 초기화 (첫 호출 지연 제거)
+        try:
+            pyperclip.paste()
+        except Exception:
+            pass
+
         logger.debug("TextProcessor initialized")
 
     def _cleanup_previous(self):

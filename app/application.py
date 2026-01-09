@@ -236,6 +236,10 @@ class QuillApp(QApplication):
 
         self.popup_window = PopupWindow()
         self.popup_window.action_requested.connect(self._on_action_requested)
+
+        # 워밍업: 레이아웃 엔진 초기화 (첫 adjustSize 호출 지연 제거)
+        self.popup_window.adjustSize()
+
         logger.debug("Popup window pre-created")
 
     @Slot(str)
