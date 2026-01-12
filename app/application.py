@@ -230,15 +230,19 @@ class QuillApp(QApplication):
         # 참고: 텍스트가 추출되면 _on_text_extracted()가 호출됨
 
     def _create_popup_window(self):
-        """팝업 윈도우 생성 (재사용을 위해 미리 생성)"""
+        """팝업 윈도우 생성 및 워밍업"""
         if self.popup_window is not None:
             return
 
         self.popup_window = PopupWindow()
         self.popup_window.action_requested.connect(self._on_action_requested)
 
-        # 워밍업: 레이아웃 엔진 초기화 (첫 adjustSize 호출 지연 제거)
-        self.popup_window.adjustSize()
+        # 워밍업: 투명 상태로 show/hide하여 렌더링 파이프라인 초기화
+        self.popup_window.setWindowOpacity(0)
+        self.popup_window.show()
+        self.processEvents()
+        self.popup_window.hide()
+        self.popup_window.setWindowOpacity(1)
 
         logger.debug("Popup window pre-created")
 
