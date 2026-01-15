@@ -53,22 +53,26 @@ class TextWorker(QObject):
             original_clipboard = pyperclip.paste()
             logger.debug(f"Clipboard backed up (length: {len(original_clipboard)})")
 
-            # 2. Ctrl+C 시뮬레이션
+            # 2. 클립보드를 마커로 설정 (동일 텍스트 재선택 감지용)
+            marker = "\x00QUILL_MARKER\x00"
+            pyperclip.copy(marker)
+
+            # 3. Ctrl+C 시뮬레이션
             with self.keyboard.pressed(Key.ctrl):
                 self.keyboard.press('c')
                 self.keyboard.release('c')
 
-            # 3. 클립보드 업데이트 대기
+            # 4. 클립보드 업데이트 대기
             time.sleep(self.sleep_duration)
 
-            # 4. 클립보드에서 텍스트 가져오기
+            # 5. 클립보드에서 텍스트 가져오기
             selected_text = pyperclip.paste()
 
-            # 5. 클립보드 복원
+            # 6. 클립보드 복원
             pyperclip.copy(original_clipboard)
 
-            # 6. 텍스트가 변경되었는지 확인
-            if selected_text != original_clipboard:
+            # 7. 마커가 아닌 텍스트가 있는지 확인
+            if selected_text and selected_text != marker:
                 logger.info(f"Text extracted successfully (length: {len(selected_text)})")
                 self.text_extracted.emit(selected_text)
             else:
