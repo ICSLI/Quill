@@ -28,7 +28,7 @@ class ConfigManager:
         },
         "hotkey": {
             "key": "<ctrl>+<space>",
-            "quick_key": "<ctrl>+<alt>+<space>",
+            "quick_key": "<ctrl>+<shift>+<space>",
             "enabled": True
         },
         "ui": {
