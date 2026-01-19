@@ -36,6 +36,7 @@ class TextWorker(QObject):
     @Slot()
     def run(self):
         """작업 실행"""
+        logger.debug(f"TextWorker.run() called, operation={self.operation}")
         try:
             if self.operation == 'extract':
                 self._extract()
@@ -49,6 +50,16 @@ class TextWorker(QObject):
     def _extract(self):
         """텍스트 추출 (Ctrl+C 시뮬레이션)"""
         try:
+            # 0. 모든 modifier 키 해제 (핫키로 눌려있을 수 있음)
+            # Ctrl+Alt+Space 같은 핫키를 누른 상태에서 Ctrl+C를 시뮬레이션하면
+            # 실제로는 Ctrl+Alt+C가 전송되어 복사가 안 됨
+            for key in [Key.ctrl, Key.alt, Key.shift, Key.cmd]:
+                try:
+                    self.keyboard.release(key)
+                except Exception:
+                    pass
+            time.sleep(0.05)  # 키 해제 대기
+
             # 1. 클립보드 백업
             original_clipboard = pyperclip.paste()
             logger.debug(f"Clipboard backed up (length: {len(original_clipboard)})")
@@ -153,6 +164,7 @@ class TextProcessor(QObject):
 
     def _start_operation(self, operation: str, replacement_text: str = ""):
         """새 작업 시작"""
+        logger.debug(f"Starting operation: {operation}")
         with self._lock:
             self._cleanup_previous()
 

@@ -26,6 +26,7 @@ Quill runs quietly in your system tray, ready to help whenever you need it. Whet
 - **ChatML Prompt Format** - Advanced prompt customization with `<|im_start|>` tags
 - **Windows DPAPI Encryption** - Your API key is securely encrypted and bound to your Windows account
 - **Global Hotkey** - Works in any application
+- **Quick Repeat** - Instantly repeat last action with a single hotkey
 - **System Tray** - Runs quietly in the background
 - **Dark Theme** - Easy on the eyes
 
@@ -79,6 +80,7 @@ On first launch, you'll see the onboarding window:
 ### ⌨️ Keyboard Shortcuts
 
 - `Ctrl+Space` - Open Quill popup (customizable)
+- `Ctrl+Shift+Space` - Quick Repeat: repeat last action without popup (customizable)
 - `Ctrl+Enter` - Send custom instruction
 - `Esc` - Close popup
 
@@ -138,7 +140,8 @@ Access via system tray → Settings:
   - Additional Params - Extra API parameters (JSON)
 
 - **Hotkey Tab**
-  - Global hotkey configuration
+  - Main Hotkey - Opens popup for action selection
+  - Quick Repeat - Repeats last action without popup (optional)
 
 - **Prompts Tab**
   - Edit prompt names and temperatures

@@ -214,14 +214,19 @@ class SettingsWindow(QDialog):
         hotkey_layout = QFormLayout()
         hotkey_layout.setSpacing(12)
 
-        # 핫키 입력
+        # 메인 핫키 입력
         self.input_hotkey = HotkeyEdit()
-        hotkey_layout.addRow("Hotkey:", self.input_hotkey)
+        hotkey_layout.addRow("Main Hotkey:", self.input_hotkey)
+
+        # 빠른 반복 핫키 입력
+        self.input_quick_hotkey = HotkeyEdit()
+        hotkey_layout.addRow("Quick Repeat:", self.input_quick_hotkey)
 
         # 도움말
         help_label = QLabel(
-            "Enter hotkey combination.\n"
-            "Example: <ctrl>+<space>, <ctrl>+<shift>+a, <alt>+q\n"
+            "Main Hotkey: Opens the prompt selection popup\n"
+            "Quick Repeat: Repeats last action without popup (leave empty to disable)\n\n"
+            "Format: <ctrl>+<space>, <ctrl>+<alt>+<space>, <alt>+q\n"
             "Note: Regular keys (a-z, 0-9) don't need angle brackets"
         )
         help_label.setObjectName("subtitleLabel")
@@ -525,6 +530,9 @@ class SettingsWindow(QDialog):
             hotkey = self.config_manager.get("hotkey.key", "<ctrl>+<space>")
             self.input_hotkey.set_key_sequence(hotkey)
 
+            quick_hotkey = self.config_manager.get("hotkey.quick_key", "")
+            self.input_quick_hotkey.set_key_sequence(quick_hotkey)
+
             logger.debug("Current settings loaded")
 
         except Exception as e:
@@ -609,6 +617,39 @@ class SettingsWindow(QDialog):
                     return
 
                 self.config_manager.set("hotkey.key", hotkey)
+
+            # 빠른 반복 핫키 저장
+            quick_hotkey = self.input_quick_hotkey.get_key_sequence()
+            if quick_hotkey:
+                # Validate quick hotkey has at least one modifier
+                if not any(mod in quick_hotkey for mod in ['<ctrl>', '<shift>', '<alt>']):
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Quick Hotkey",
+                        "Quick Repeat hotkey must include at least one modifier key (Ctrl, Shift, or Alt)."
+                    )
+                    return
+
+                # Validate quick hotkey is different from main hotkey
+                if hotkey and quick_hotkey.lower() == hotkey.lower():
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Quick Hotkey",
+                        "Quick Repeat hotkey must be different from Main Hotkey."
+                    )
+                    return
+
+                # Validate against critical system hotkeys
+                if quick_hotkey.lower() in critical_hotkeys:
+                    QMessageBox.warning(
+                        self,
+                        "Reserved Hotkey",
+                        f"'{quick_hotkey}' is a critical system hotkey and cannot be used.\n\n"
+                        "Please choose a different combination."
+                    )
+                    return
+
+            self.config_manager.set("hotkey.quick_key", quick_hotkey)
 
             # 파일에 저장
             self.config_manager.save()

@@ -72,6 +72,12 @@ class QuillApp(QApplication):
         # 상태
         self.current_text = ""  # 현재 선택된 텍스트
 
+        # 빠른 반복 실행용 마지막 액션 저장
+        self._last_prompt_key: str = ""
+        self._last_instruction: str = ""
+        self._quick_mode: bool = False  # 빠른 실행 모드 플래그
+        self._extraction_in_progress: bool = False  # 텍스트 추출 진행 중 플래그
+
         # AI 요청 동기화
         self._ai_request_lock = threading.Lock()
         self._ai_request_in_progress = False
@@ -107,6 +113,7 @@ class QuillApp(QApplication):
         """Signal/Slot 연결"""
         # Hotkey Manager
         self.hotkey_manager.hotkey_pressed.connect(self._on_hotkey_pressed)
+        self.hotkey_manager.quick_hotkey_pressed.connect(self._on_quick_hotkey_pressed)
 
         # Text Processor
         self.text_processor.text_extracted.connect(self._on_text_extracted)
@@ -187,8 +194,9 @@ class QuillApp(QApplication):
 
             # 핫키 시작
             hotkey = self.config_manager.get("hotkey.key", "<ctrl>+<space>")
-            self.hotkey_manager.start(hotkey)
-            logger.info(f"Hotkey started: {hotkey}")
+            quick_hotkey = self.config_manager.get("hotkey.quick_key", "")
+            self.hotkey_manager.start(hotkey, quick_hotkey)
+            logger.info(f"Hotkey started: main={hotkey}, quick={quick_hotkey or 'disabled'}")
 
             # 트레이 아이콘 생성
             self.tray_manager.create_tray_icon()
@@ -211,7 +219,33 @@ class QuillApp(QApplication):
     @Slot(int, int)
     def _on_hotkey_pressed(self, x: int, y: int):
         """
-        핫키가 눌렸을 때
+        메인 핫키가 눌렸을 때
+
+        Args:
+            x: 마우스 X 좌표
+            y: 마우스 Y 좌표
+        """
+        # AI 요청 또는 텍스트 추출 진행 중이면 무시
+        if self._ai_request_in_progress:
+            logger.debug("AI request in progress, ignoring hotkey")
+            return
+        if self._extraction_in_progress:
+            logger.debug("Extraction in progress, ignoring main hotkey")
+            return
+
+        logger.debug(f"Main hotkey pressed at ({x}, {y})")
+
+        # 일반 모드로 텍스트 추출
+        self._quick_mode = False
+        self._extraction_in_progress = True
+        self.text_processor.extract_selected_text()
+
+        # 참고: 텍스트가 추출되면 _on_text_extracted()가 호출됨
+
+    @Slot(int, int)
+    def _on_quick_hotkey_pressed(self, x: int, y: int):
+        """
+        빠른 반복 핫키가 눌렸을 때
 
         Args:
             x: 마우스 X 좌표
@@ -219,12 +253,39 @@ class QuillApp(QApplication):
         """
         # AI 요청 진행 중이면 무시
         if self._ai_request_in_progress:
-            logger.debug("AI request in progress, ignoring hotkey")
+            logger.debug("AI request in progress, ignoring quick hotkey")
             return
 
-        logger.debug(f"Hotkey pressed at ({x}, {y})")
+        # 이전 액션이 없으면 일반 모드로 팝업 표시
+        if not self._last_prompt_key:
+            logger.debug("No previous action, falling back to normal popup")
+            self._quick_mode = False
+            self._extraction_in_progress = True
+            self.text_processor.extract_selected_text()
+            return
 
-        # 텍스트 추출 시작
+        # 프롬프트가 여전히 존재하는지 확인
+        if not self.prompt_manager.get_prompt_info(self._last_prompt_key):
+            logger.warning(f"Previous prompt '{self._last_prompt_key}' no longer exists")
+            self.tray_manager.show_message(
+                "Quick Repeat",
+                f"Previous prompt '{self._last_prompt_key}' no longer exists."
+            )
+            self._last_prompt_key = ""
+            return
+
+        logger.debug(f"Quick hotkey pressed at ({x}, {y}), repeating: {self._last_prompt_key}")
+
+        # 빠른 실행 모드 설정
+        self._quick_mode = True
+
+        # 이미 추출 진행 중이면 해당 추출 결과를 quick mode로 사용
+        if self._extraction_in_progress:
+            logger.debug("Extraction already in progress, will use its result in quick mode")
+            return
+
+        # 새로 추출 시작
+        self._extraction_in_progress = True
         self.text_processor.extract_selected_text()
 
         # 참고: 텍스트가 추출되면 _on_text_extracted()가 호출됨
@@ -254,13 +315,25 @@ class QuillApp(QApplication):
         Args:
             text: 추출된 텍스트
         """
+        # 추출 완료 플래그 리셋
+        self._extraction_in_progress = False
+
         if not text:
             logger.debug("No text selected, ignoring hotkey")
+            self._quick_mode = False  # 플래그 리셋
             return
 
-        logger.info(f"Text extracted (length: {len(text)})")
+        logger.debug(f"Text extracted (length: {len(text)}), quick_mode={self._quick_mode}")
         self.current_text = text
 
+        # 빠른 실행 모드: 팝업 없이 바로 AI 호출
+        if self._quick_mode:
+            self._quick_mode = False  # 플래그 리셋
+            logger.debug(f"Quick mode: executing {self._last_prompt_key}")
+            self._on_action_requested(self._last_prompt_key, text, self._last_instruction)
+            return
+
+        # 일반 모드: 팝업 표시
         # 팝업이 없으면 생성 (앱 시작 시 생성되지 않은 경우 대비)
         if self.popup_window is None:
             self._create_popup_window()
@@ -286,6 +359,10 @@ class QuillApp(QApplication):
                 logger.warning("AI request already in progress, ignoring")
                 return
             self._ai_request_in_progress = True
+
+        # 마지막 액션 저장 (빠른 반복 실행용)
+        self._last_prompt_key = prompt_key
+        self._last_instruction = instruction
 
         logger.info(f"Action requested: {prompt_key}")
 
@@ -390,7 +467,8 @@ class QuillApp(QApplication):
 
             # 핫키 재시작
             hotkey = self.config_manager.get("hotkey.key", "<ctrl>+<space>")
-            self.hotkey_manager.set_hotkey(hotkey)
+            quick_hotkey = self.config_manager.get("hotkey.quick_key", "")
+            self.hotkey_manager.set_hotkeys(hotkey, quick_hotkey)
 
             logger.info("Configuration reloaded successfully")
 
