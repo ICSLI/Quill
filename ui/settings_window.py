@@ -77,6 +77,19 @@ class HotkeyEdit(QLineEdit):
 class SettingsWindow(QDialog):
     """설정 창"""
 
+    ACTION_HOTKEY_LABELS = {
+        "grammar_check": "Grammar Check:",
+        "rewrite": "Rewrite:",
+        "summarize": "Summarize:",
+        "translate": "Translate:"
+    }
+    DEFAULT_ACTION_HOTKEYS = {
+        "grammar_check": "<ctrl>+<shift>+<g>",
+        "rewrite": "<ctrl>+<shift>+<r>",
+        "summarize": "<ctrl>+<shift>+<s>",
+        "translate": "<ctrl>+<shift>+<t>"
+    }
+
     # Signal: 설정 저장 완료
     settings_saved = Signal(dict)
 
@@ -95,6 +108,7 @@ class SettingsWindow(QDialog):
         self.config_manager = config_manager
         self.crypto_manager = crypto_manager
         self.prompt_manager = prompt_manager
+        self.input_action_hotkeys = {}
 
         self.setWindowTitle("Quill - Settings")
         self.setModal(True)
@@ -225,7 +239,8 @@ class SettingsWindow(QDialog):
         # 도움말
         help_label = QLabel(
             "Main Hotkey: Opens the prompt selection popup\n"
-            "Quick Repeat: Repeats last action without popup (leave empty to disable)\n\n"
+            "Quick Repeat: Repeats last action without popup (leave empty to disable)\n"
+            "Direct Action Hotkeys: Run a specific action immediately\n\n"
             "Format: <ctrl>+<space>, <ctrl>+<alt>+<space>, <alt>+q\n"
             "Note: Regular keys (a-z, 0-9) don't need angle brackets"
         )
@@ -235,6 +250,27 @@ class SettingsWindow(QDialog):
 
         hotkey_group.setLayout(hotkey_layout)
         layout.addWidget(hotkey_group)
+
+        # Direct action hotkey settings group
+        action_group = QGroupBox("Direct Action Hotkeys (Optional)")
+        action_layout = QFormLayout()
+        action_layout.setSpacing(12)
+
+        for prompt_key, label in self.ACTION_HOTKEY_LABELS.items():
+            hotkey_input = HotkeyEdit()
+            self.input_action_hotkeys[prompt_key] = hotkey_input
+            action_layout.addRow(label, hotkey_input)
+
+        action_help_label = QLabel(
+            "Select text and press a direct action hotkey to run without opening the popup.\n"
+            "Leave empty to disable any action."
+        )
+        action_help_label.setObjectName("subtitleLabel")
+        action_help_label.setWordWrap(True)
+        action_layout.addRow("", action_help_label)
+
+        action_group.setLayout(action_layout)
+        layout.addWidget(action_group)
 
         layout.addStretch()
 
@@ -533,6 +569,21 @@ class SettingsWindow(QDialog):
             quick_hotkey = self.config_manager.get("hotkey.quick_key", "")
             self.input_quick_hotkey.set_key_sequence(quick_hotkey)
 
+            action_hotkeys = self.config_manager.get(
+                "hotkey.action_keys",
+                self.DEFAULT_ACTION_HOTKEYS.copy()
+            )
+            if not isinstance(action_hotkeys, dict):
+                action_hotkeys = self.DEFAULT_ACTION_HOTKEYS.copy()
+
+            for prompt_key, hotkey_input in self.input_action_hotkeys.items():
+                hotkey_value = action_hotkeys.get(
+                    prompt_key,
+                    self.DEFAULT_ACTION_HOTKEYS.get(prompt_key, "")
+                )
+                if isinstance(hotkey_value, str):
+                    hotkey_input.set_key_sequence(hotkey_value)
+
             logger.debug("Current settings loaded")
 
         except Exception as e:
@@ -589,67 +640,71 @@ class SettingsWindow(QDialog):
                 self.config_manager.set_api_key(api_key)
 
             # 핫키 저장
-            hotkey = self.input_hotkey.get_key_sequence()
-            if hotkey:
-                # Validate hotkey has at least one modifier
-                if not any(mod in hotkey for mod in ['<ctrl>', '<shift>', '<alt>']):
+            critical_hotkeys = [
+                '<alt>+<f4>',  # Close window
+                '<ctrl>+<alt>+<delete>',  # Security screen
+                '<ctrl>+<shift>+<esc>',  # Task Manager
+            ]
+            used_hotkeys = {}
+
+            def validate_hotkey(field_name: str, hotkey_value: str) -> bool:
+                # Must include at least one modifier key
+                if not any(mod in hotkey_value for mod in ['<ctrl>', '<shift>', '<alt>']):
                     QMessageBox.warning(
                         self,
                         "Invalid Hotkey",
-                        "Hotkey must include at least one modifier key (Ctrl, Shift, or Alt)."
+                        f"{field_name} must include at least one modifier key (Ctrl, Shift, or Alt)."
                     )
-                    return
+                    return False
 
-                # Validate against critical system hotkeys only
-                critical_hotkeys = [
-                    '<alt>+<f4>',  # Close window
-                    '<ctrl>+<alt>+<delete>',  # Security screen
-                    '<ctrl>+<shift>+<esc>',  # Task Manager
-                ]
-
-                if hotkey.lower() in critical_hotkeys:
+                # Block reserved system hotkeys
+                if hotkey_value.lower() in critical_hotkeys:
                     QMessageBox.warning(
                         self,
                         "Reserved Hotkey",
-                        f"'{hotkey}' is a critical system hotkey and cannot be used.\n\n"
+                        f"'{hotkey_value}' is a critical system hotkey and cannot be used.\n\n"
                         "Please choose a different combination."
                     )
-                    return
+                    return False
 
+                # Prevent collisions with other configured hotkeys
+                existing_field = used_hotkeys.get(hotkey_value.lower())
+                if existing_field:
+                    QMessageBox.warning(
+                        self,
+                        "Duplicate Hotkey",
+                        f"{field_name} uses the same hotkey as {existing_field}.\n\n"
+                        "Each hotkey must be unique."
+                    )
+                    return False
+
+                used_hotkeys[hotkey_value.lower()] = field_name
+                return True
+
+            hotkey = self.input_hotkey.get_key_sequence()
+            if hotkey and not validate_hotkey("Main Hotkey", hotkey):
+                return
+            if hotkey:
                 self.config_manager.set("hotkey.key", hotkey)
 
             # 빠른 반복 핫키 저장
             quick_hotkey = self.input_quick_hotkey.get_key_sequence()
-            if quick_hotkey:
-                # Validate quick hotkey has at least one modifier
-                if not any(mod in quick_hotkey for mod in ['<ctrl>', '<shift>', '<alt>']):
-                    QMessageBox.warning(
-                        self,
-                        "Invalid Quick Hotkey",
-                        "Quick Repeat hotkey must include at least one modifier key (Ctrl, Shift, or Alt)."
-                    )
+            if quick_hotkey and not validate_hotkey("Quick Repeat", quick_hotkey):
+                return
+
+            # Save direct action hotkeys
+            action_hotkeys = {}
+            for prompt_key, label in self.ACTION_HOTKEY_LABELS.items():
+                action_hotkey = self.input_action_hotkeys[prompt_key].get_key_sequence()
+                action_name = label.rstrip(':')
+
+                if action_hotkey and not validate_hotkey(action_name, action_hotkey):
                     return
 
-                # Validate quick hotkey is different from main hotkey
-                if hotkey and quick_hotkey.lower() == hotkey.lower():
-                    QMessageBox.warning(
-                        self,
-                        "Invalid Quick Hotkey",
-                        "Quick Repeat hotkey must be different from Main Hotkey."
-                    )
-                    return
-
-                # Validate against critical system hotkeys
-                if quick_hotkey.lower() in critical_hotkeys:
-                    QMessageBox.warning(
-                        self,
-                        "Reserved Hotkey",
-                        f"'{quick_hotkey}' is a critical system hotkey and cannot be used.\n\n"
-                        "Please choose a different combination."
-                    )
-                    return
+                action_hotkeys[prompt_key] = action_hotkey
 
             self.config_manager.set("hotkey.quick_key", quick_hotkey)
+            self.config_manager.set("hotkey.action_keys", action_hotkeys)
 
             # 파일에 저장
             self.config_manager.save()

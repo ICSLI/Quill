@@ -76,6 +76,7 @@ class QuillApp(QApplication):
         self._last_prompt_key: str = ""
         self._last_instruction: str = ""
         self._quick_mode: bool = False  # 빠른 실행 모드 플래그
+        self._pending_direct_prompt_key: str = ""  # Pending prompt for direct action hotkey
         self._extraction_in_progress: bool = False  # 텍스트 추출 진행 중 플래그
 
         # AI 요청 동기화
@@ -114,6 +115,7 @@ class QuillApp(QApplication):
         # Hotkey Manager
         self.hotkey_manager.hotkey_pressed.connect(self._on_hotkey_pressed)
         self.hotkey_manager.quick_hotkey_pressed.connect(self._on_quick_hotkey_pressed)
+        self.hotkey_manager.action_hotkey_pressed.connect(self._on_action_hotkey_pressed)
 
         # Text Processor
         self.text_processor.text_extracted.connect(self._on_text_extracted)
@@ -195,8 +197,12 @@ class QuillApp(QApplication):
             # 핫키 시작
             hotkey = self.config_manager.get("hotkey.key", "<ctrl>+<space>")
             quick_hotkey = self.config_manager.get("hotkey.quick_key", "")
-            self.hotkey_manager.start(hotkey, quick_hotkey)
-            logger.info(f"Hotkey started: main={hotkey}, quick={quick_hotkey or 'disabled'}")
+            action_hotkeys = self._get_action_hotkeys_config()
+            self.hotkey_manager.start(hotkey, quick_hotkey, action_hotkeys)
+            logger.info(
+                f"Hotkey started: main={hotkey}, quick={quick_hotkey or 'disabled'}, "
+                f"action_keys={action_hotkeys}"
+            )
 
             # 트레이 아이콘 생성
             self.tray_manager.create_tray_icon()
@@ -215,6 +221,26 @@ class QuillApp(QApplication):
                 f"Failed to start application: {e}\n\nPlease check your configuration."
             )
             self.quit()
+
+    def _get_action_hotkeys_config(self) -> dict:
+        """Read and normalize direct action hotkeys from config."""
+        defaults = {
+            "grammar_check": "<ctrl>+<shift>+<g>",
+            "rewrite": "<ctrl>+<shift>+<r>",
+            "summarize": "<ctrl>+<shift>+<s>",
+            "translate": "<ctrl>+<shift>+<t>"
+        }
+
+        action_hotkeys = self.config_manager.get("hotkey.action_keys", {})
+        if not isinstance(action_hotkeys, dict):
+            return defaults
+
+        normalized = defaults.copy()
+        for key in normalized.keys():
+            value = action_hotkeys.get(key, "")
+            if isinstance(value, str):
+                normalized[key] = value
+        return normalized
 
     @Slot(int, int)
     def _on_hotkey_pressed(self, x: int, y: int):
@@ -237,6 +263,7 @@ class QuillApp(QApplication):
 
         # 일반 모드로 텍스트 추출
         self._quick_mode = False
+        self._pending_direct_prompt_key = ""
         self._extraction_in_progress = True
         self.text_processor.extract_selected_text()
 
@@ -260,6 +287,7 @@ class QuillApp(QApplication):
         if not self._last_prompt_key:
             logger.debug("No previous action, falling back to normal popup")
             self._quick_mode = False
+            self._pending_direct_prompt_key = ""
             self._extraction_in_progress = True
             self.text_processor.extract_selected_text()
             return
@@ -278,6 +306,7 @@ class QuillApp(QApplication):
 
         # 빠른 실행 모드 설정
         self._quick_mode = True
+        self._pending_direct_prompt_key = ""
 
         # 이미 추출 진행 중이면 해당 추출 결과를 quick mode로 사용
         if self._extraction_in_progress:
@@ -289,6 +318,37 @@ class QuillApp(QApplication):
         self.text_processor.extract_selected_text()
 
         # 참고: 텍스트가 추출되면 _on_text_extracted()가 호출됨
+
+    @Slot(str, int, int)
+    def _on_action_hotkey_pressed(self, prompt_key: str, x: int, y: int):
+        """
+        Called when a direct action hotkey is pressed.
+
+        Args:
+            prompt_key: Prompt key to execute
+            x: Mouse X position
+            y: Mouse Y position
+        """
+        if self._ai_request_in_progress:
+            logger.debug("AI request in progress, ignoring action hotkey")
+            return
+
+        if not self.prompt_manager.get_prompt_info(prompt_key):
+            logger.warning(f"Unknown prompt for action hotkey: {prompt_key}")
+            return
+
+        logger.debug(f"Action hotkey pressed at ({x}, {y}), prompt={prompt_key}")
+
+        self._quick_mode = False
+        self._pending_direct_prompt_key = prompt_key
+
+        # If extraction is already running, use that result for direct mode
+        if self._extraction_in_progress:
+            logger.debug("Extraction already in progress, will use its result for direct action")
+            return
+
+        self._extraction_in_progress = True
+        self.text_processor.extract_selected_text()
 
     def _create_popup_window(self):
         """팝업 윈도우 생성 및 워밍업"""
@@ -321,10 +381,22 @@ class QuillApp(QApplication):
         if not text:
             logger.debug("No text selected, ignoring hotkey")
             self._quick_mode = False  # 플래그 리셋
+            self._pending_direct_prompt_key = ""
             return
 
-        logger.debug(f"Text extracted (length: {len(text)}), quick_mode={self._quick_mode}")
+        logger.debug(
+            f"Text extracted (length: {len(text)}), quick_mode={self._quick_mode}, "
+            f"direct_mode={bool(self._pending_direct_prompt_key)}"
+        )
         self.current_text = text
+
+        # Direct mode: run the specified prompt without opening the popup
+        if self._pending_direct_prompt_key:
+            prompt_key = self._pending_direct_prompt_key
+            self._pending_direct_prompt_key = ""
+            logger.debug(f"Direct mode: executing {prompt_key}")
+            self._on_action_requested(prompt_key, text, "")
+            return
 
         # 빠른 실행 모드: 팝업 없이 바로 AI 호출
         if self._quick_mode:
@@ -468,7 +540,8 @@ class QuillApp(QApplication):
             # 핫키 재시작
             hotkey = self.config_manager.get("hotkey.key", "<ctrl>+<space>")
             quick_hotkey = self.config_manager.get("hotkey.quick_key", "")
-            self.hotkey_manager.set_hotkeys(hotkey, quick_hotkey)
+            action_hotkeys = self._get_action_hotkeys_config()
+            self.hotkey_manager.set_hotkeys(hotkey, quick_hotkey, action_hotkeys)
 
             logger.info("Configuration reloaded successfully")
 

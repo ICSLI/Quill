@@ -29,6 +29,12 @@ class ConfigManager:
         "hotkey": {
             "key": "<ctrl>+<space>",
             "quick_key": "<ctrl>+<shift>+<space>",
+            "action_keys": {
+                "grammar_check": "<ctrl>+<shift>+<g>",
+                "rewrite": "<ctrl>+<shift>+<r>",
+                "summarize": "<ctrl>+<shift>+<s>",
+                "translate": "<ctrl>+<shift>+<t>"
+            },
             "enabled": True
         },
         "ui": {
