@@ -31,6 +31,7 @@ class PopupWindow(QWidget):
         super().__init__(parent)
 
         self.selected_text = ""
+        self._action_submitted = False
 
         # 윈도우 플래그 설정
         self.setWindowFlags(
@@ -71,6 +72,7 @@ class PopupWindow(QWidget):
 
         # 미리보기 라벨
         self.preview_label = QLabel("Select text to process")
+        self.preview_label.setTextFormat(Qt.TextFormat.PlainText)
         self.preview_label.setObjectName("previewLabel")
         text_info_layout.addWidget(self.preview_label)
 
@@ -134,6 +136,7 @@ class PopupWindow(QWidget):
             "Enter custom instruction here...\n"
             "(Press Enter to send, Shift+Enter for newline)"
         )
+        self.prompt_input.setAcceptRichText(False)
         self.prompt_input.setFixedHeight(80)
         self.prompt_input.installEventFilter(self)
         layout.addWidget(self.prompt_input)
@@ -143,6 +146,8 @@ class PopupWindow(QWidget):
         self.btn_send.setObjectName("sendButton")
         self.btn_send.setFixedHeight(36)
         self.btn_send.clicked.connect(lambda: self._emit_action("custom"))
+        self.prompt_input.textChanged.connect(self._update_send_enabled)
+        self.btn_send.setEnabled(False)
         layout.addWidget(self.btn_send)
 
         # ESC로 닫기 안내
@@ -270,6 +275,7 @@ class PopupWindow(QWidget):
             text: 선택된 텍스트
         """
         self.selected_text = text
+        self._action_submitted = False
 
         # 입력칸 초기화 (이전 입력 제거)
         self.prompt_input.clear()
@@ -283,7 +289,7 @@ class PopupWindow(QWidget):
         # 화면 경계 확인
         screen = self._get_screen_at(x, y)
         if screen:
-            screen_geometry = screen.geometry()
+            screen_geometry = screen.availableGeometry()
 
             # 팝업 크기
             popup_width = self.width()
@@ -294,11 +300,11 @@ class PopupWindow(QWidget):
             new_y = y + 20  # 커서 아래 20픽셀
 
             # 우측 경계 체크
-            if new_x + popup_width > screen_geometry.right():
-                new_x = screen_geometry.right() - popup_width
+            if new_x + popup_width > screen_geometry.right() + 1:
+                new_x = screen_geometry.right() + 1 - popup_width
 
             # 하단 경계 체크
-            if new_y + popup_height > screen_geometry.bottom():
+            if new_y + popup_height > screen_geometry.bottom() + 1:
                 new_y = y - popup_height - 10  # 커서 위로
 
             # 좌측 경계 체크
@@ -309,6 +315,7 @@ class PopupWindow(QWidget):
             if new_y < screen_geometry.top():
                 new_y = screen_geometry.top()
 
+            new_y = max(screen_geometry.top(), min(new_y, screen_geometry.bottom() + 1 - popup_height))
             self.move(new_x, new_y)
 
         else:
@@ -322,7 +329,7 @@ class PopupWindow(QWidget):
 
         # 약간의 지연 후 포커스 (이벤트 필터가 올바르게 작동하도록)
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(50, lambda: self.prompt_input.setFocus())
+        QTimer.singleShot(50, self._focus_input)
 
         logger.debug(f"Popup shown at ({x}, {y}), text length: {len(text)}")
 
@@ -354,15 +361,24 @@ class PopupWindow(QWidget):
             prompt_key: 프롬프트 키 (grammar_check, rewrite, etc.)
         """
         instruction = self.prompt_input.toPlainText().strip()
-
-        logger.info(f"Action requested: {prompt_key}, instruction length: {len(instruction)}")
-
-        # Signal 발생
-        self.action_requested.emit(prompt_key, self.selected_text, instruction)
-
-        # 입력칸 초기화 및 숨기기
+        if self._action_submitted or not self.selected_text.strip():
+            return
+        if prompt_key == "custom" and not instruction:
+            self.prompt_input.setFocus()
+            return
+        self._action_submitted = True
+        selected_text = self.selected_text
         self.prompt_input.clear()
         self.hide()
+        # Return focus to the source before the application starts replacement.
+        self.action_requested.emit(prompt_key, selected_text, instruction)
+
+    def _update_send_enabled(self):
+        self.btn_send.setEnabled(bool(self.prompt_input.toPlainText().strip()))
+
+    def _focus_input(self):
+        if self.isVisible():
+            self.prompt_input.setFocus()
 
 
 # 테스트 코드

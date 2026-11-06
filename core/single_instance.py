@@ -38,13 +38,16 @@ class SingleInstanceLock:
         Returns:
             True면 Lock 획득 성공 (첫 인스턴스), False면 이미 다른 인스턴스 실행 중
         """
+        if self.lock_file is not None:
+            return True
         try:
             # Windows에서는 exclusive 모드로 파일 열기
             if sys.platform == "win32":
                 import msvcrt
 
                 # 파일 열기
-                self.lock_file = open(self.lock_file_path, "w")
+                self.lock_file = open(self.lock_file_path, "a+b")
+                self.lock_file.seek(0)
 
                 # Exclusive lock 시도
                 try:
@@ -59,7 +62,7 @@ class SingleInstanceLock:
                 # Unix-like 시스템 (향후 확장용)
                 import fcntl
 
-                self.lock_file = open(self.lock_file_path, "w")
+                self.lock_file = open(self.lock_file_path, "a+b")
 
                 try:
                     fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -70,13 +73,18 @@ class SingleInstanceLock:
                     return False
 
             # PID 기록
-            self.lock_file.write(str(os.getpid()))
+            self.lock_file.seek(0)
+            self.lock_file.truncate()
+            self.lock_file.write(str(os.getpid()).encode("ascii"))
             self.lock_file.flush()
 
             logger.info("Single instance lock acquired")
             return True
 
         except Exception as e:
+            if self.lock_file is not None:
+                self.lock_file.close()
+                self.lock_file = None
             logger.error(f"Error acquiring lock: {e}")
             return False
 
@@ -86,23 +94,20 @@ class SingleInstanceLock:
             try:
                 if sys.platform == "win32":
                     import msvcrt
+                    self.lock_file.seek(0)
                     msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
                 else:
                     import fcntl
                     fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
 
-                self.lock_file.close()
-                self.lock_file = None
-
-                # Lock 파일 삭제
-                if self.lock_file_path.exists():
-                    self.lock_file_path.unlink()
-
                 logger.info("Single instance lock released")
 
             except Exception as e:
                 logger.error(f"Error releasing lock: {e}")
+            finally:
+                self.lock_file.close()
+                self.lock_file = None
 
     def __enter__(self):
         """Context manager 진입"""

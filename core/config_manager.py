@@ -5,11 +5,14 @@ JSON 설정 파일의 로드/저장을 담당하며, CryptoManager를 통해 API
 """
 
 import json
+from copy import deepcopy
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 
 from core.crypto_manager import CryptoManager
+from core.ai_provider import validate_api_url
+from core.storage import atomic_write_json
 
 
 logger = logging.getLogger(__name__)
@@ -71,7 +74,8 @@ class ConfigManager:
             api_config = config.get("api", {})
             base_url = api_config.get("base_url", "")
             model = api_config.get("model", "")
-            is_valid = bool(base_url and model)
+            validate_api_url(base_url)
+            is_valid = isinstance(model, str) and bool(model.strip())
             logger.debug(f"Config file exists, configured: {is_valid} (base_url={bool(base_url)}, model={bool(model)})")
             return is_valid
         except Exception as e:
@@ -95,9 +99,11 @@ class ConfigManager:
 
         try:
             with open(self.config_path, 'r', encoding='utf-8') as f:
-                self._config = json.load(f)
+                loaded = json.load(f)
+            self._validate_structure(loaded)
+            self._config = deepcopy(loaded)
             logger.info(f"Configuration loaded successfully from {self.config_path}")
-            return self._config
+            return deepcopy(self._config)
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in config file: {e}")
             raise
@@ -115,19 +121,31 @@ class ConfigManager:
         Raises:
             OSError: 파일 쓰기 실패 시
         """
-        if config is not None:
-            self._config = config
+        candidate = deepcopy(self._config if config is None else config)
+        self._validate_structure(candidate)
+        atomic_write_json(self.config_path, candidate)
+        self._config = candidate
+        logger.info("Configuration saved to %s", self.config_path)
 
-        # data 디렉토리가 없으면 생성
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(self._config, f, indent=2, ensure_ascii=False)
-            logger.info(f"Configuration saved to {self.config_path}")
-        except Exception as e:
-            logger.error(f"Error saving config: {e}")
-            raise
+    @staticmethod
+    def _validate_structure(config: Dict[str, Any]) -> None:
+        if not isinstance(config, dict):
+            raise ValueError("Configuration must be a JSON object")
+        for section in ("api", "hotkey", "ui"):
+            if section in config and not isinstance(config[section], dict):
+                raise ValueError(f"Configuration section '{section}' must be an object")
+        api = config.get("api", {})
+        for key in ("base_url", "model", "api_key_encrypted"):
+            if key in api and not isinstance(api[key], str):
+                raise ValueError(f"API setting '{key}' must be a string")
+        if not isinstance(api.get("additional_params", {}), dict):
+            raise ValueError("Additional parameters must be a JSON object")
+        hotkey = config.get("hotkey", {})
+        for key in ("key", "quick_key"):
+            if key in hotkey and not isinstance(hotkey[key], str):
+                raise ValueError(f"Hotkey setting '{key}' must be a string")
+        if "enabled" in hotkey and not isinstance(hotkey["enabled"], bool):
+            raise ValueError("Hotkey enabled must be a boolean")
 
     def get(self, key: str, default: Any = None) -> Any:
         """
@@ -173,10 +191,12 @@ class ConfigManager:
         for k in keys[:-1]:
             if k not in target:
                 target[k] = {}
+            if not isinstance(target[k], dict):
+                raise ValueError(f"Configuration path is not an object: {k}")
             target = target[k]
 
         target[keys[-1]] = value
-        logger.debug(f"Set config: {key} = {value}")
+        logger.debug("Set config field: %s", key)
 
     def get_api_key(self) -> str:
         """
@@ -224,7 +244,7 @@ class ConfigManager:
         기본 설정 파일 생성
         """
         logger.info("Creating default config")
-        self._config = self.DEFAULT_CONFIG.copy()
+        self._config = deepcopy(self.DEFAULT_CONFIG)
         self.save()
 
     def get_all(self) -> Dict[str, Any]:
@@ -234,7 +254,7 @@ class ConfigManager:
         Returns:
             전체 설정 딕셔너리
         """
-        return self._config.copy()
+        return deepcopy(self._config)
 
 
 # 간단한 테스트 코드

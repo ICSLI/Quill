@@ -227,3 +227,17 @@ See [LICENSE](LICENSE) for details.
 ---
 
 **Quill** 🪶 - AI-powered writing assistant for Windows
+
+## Development checks
+
+Run the regression suite with `python -m unittest discover -s tests -v`.
+See [build_instructions.md](build_instructions.md) for packaging and release checks.
+
+Quill verifies the source window and selected text before pasting an AI result.
+If focus or selection changes while a request is running, it leaves the target untouched.
+Empty, truncated, and filtered responses are rejected. Settings changes are blocked while
+an input or AI operation is running.
+
+Clipboard handling currently restores plain text only; rich text, images, and other
+clipboard formats are not preserved. Applications that block synthetic copy/paste,
+including elevated applications, still require manual compatibility testing.

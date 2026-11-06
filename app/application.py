@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
-from PySide6.QtCore import Slot, Signal
+from PySide6.QtCore import Slot, Signal, QTimer
 from PySide6.QtGui import QIcon
 
 # Core modules
@@ -37,10 +37,9 @@ class QuillApp(QApplication):
     """Quill 메인 애플리케이션 클래스"""
 
     # Signal: 백그라운드 스레드에서 에러 발생 시
-    error_occurred = Signal(str, str)
 
     # Signal: 스레드 안전한 텍스트 교체
-    _replace_text_signal = Signal(str)
+    _ai_completed = Signal(str, str)
 
     def __init__(self, argv):
         """QuillApp 초기화"""
@@ -79,11 +78,14 @@ class QuillApp(QApplication):
         self._extraction_in_progress: bool = False  # 텍스트 추출 진행 중 플래그
 
         # AI 요청 동기화
-        self._ai_request_lock = threading.Lock()
+        self._shutting_down = False
+        self._request_thread = None
         self._ai_request_in_progress = False
+        self._pending_response = ""
 
         # Signal/Slot 연결
         self._connect_signals()
+        self.aboutToQuit.connect(self._cleanup)
 
         # 첫 실행 확인
         if not self.config_manager.is_configured():
@@ -118,17 +120,15 @@ class QuillApp(QApplication):
         # Text Processor
         self.text_processor.text_extracted.connect(self._on_text_extracted)
         self.text_processor.text_replaced.connect(self._on_text_replaced)
+        self.text_processor.operation_failed.connect(self._on_text_operation_failed)
 
         # Tray Manager
         self.tray_manager.settings_requested.connect(self._show_settings)
         self.tray_manager.pause_toggled.connect(self._on_pause_toggled)
         self.tray_manager.quit_requested.connect(self._on_quit_requested)
 
-        # Error handling
-        self.error_occurred.connect(self._show_error_dialog)
-
         # 스레드 안전한 텍스트 교체
-        self._replace_text_signal.connect(self._do_replace_text)
+        self._ai_completed.connect(self._on_ai_completed)
 
         logger.debug("All signals connected")
 
@@ -214,7 +214,7 @@ class QuillApp(QApplication):
                 "Error",
                 f"Failed to start application: {e}\n\nPlease check your configuration."
             )
-            self.quit()
+            QTimer.singleShot(0, self.quit)
 
     @Slot(int, int)
     def _on_hotkey_pressed(self, x: int, y: int):
@@ -226,7 +226,7 @@ class QuillApp(QApplication):
             y: 마우스 Y 좌표
         """
         # AI 요청 또는 텍스트 추출 진행 중이면 무시
-        if self._ai_request_in_progress:
+        if self._shutting_down or self._ai_request_in_progress or self.activeModalWidget() is not None:
             logger.debug("AI request in progress, ignoring hotkey")
             return
         if self._extraction_in_progress:
@@ -252,8 +252,11 @@ class QuillApp(QApplication):
             y: 마우스 Y 좌표
         """
         # AI 요청 진행 중이면 무시
-        if self._ai_request_in_progress:
+        if self._shutting_down or self._ai_request_in_progress or self.activeModalWidget() is not None:
             logger.debug("AI request in progress, ignoring quick hotkey")
+            return
+
+        if self._extraction_in_progress:
             return
 
         # 이전 액션이 없으면 일반 모드로 팝업 표시
@@ -279,12 +282,7 @@ class QuillApp(QApplication):
         # 빠른 실행 모드 설정
         self._quick_mode = True
 
-        # 이미 추출 진행 중이면 해당 추출 결과를 quick mode로 사용
-        if self._extraction_in_progress:
-            logger.debug("Extraction already in progress, will use its result in quick mode")
-            return
 
-        # 새로 추출 시작
         self._extraction_in_progress = True
         self.text_processor.extract_selected_text()
 
@@ -299,11 +297,7 @@ class QuillApp(QApplication):
         self.popup_window.action_requested.connect(self._on_action_requested)
 
         # 워밍업: 투명 상태로 show/hide하여 렌더링 파이프라인 초기화
-        self.popup_window.setWindowOpacity(0)
-        self.popup_window.show()
-        self.processEvents()
-        self.popup_window.hide()
-        self.popup_window.setWindowOpacity(1)
+        self.popup_window.ensurePolished()
 
         logger.debug("Popup window pre-created")
 
@@ -317,6 +311,8 @@ class QuillApp(QApplication):
         """
         # 추출 완료 플래그 리셋
         self._extraction_in_progress = False
+        if self._shutting_down:
+            return
 
         if not text:
             logger.debug("No text selected, ignoring hotkey")
@@ -353,79 +349,84 @@ class QuillApp(QApplication):
             text: 선택된 텍스트
             instruction: 사용자 지시사항
         """
-        # 중복 요청 방지
-        with self._ai_request_lock:
-            if self._ai_request_in_progress:
-                logger.warning("AI request already in progress, ignoring")
-                return
-            self._ai_request_in_progress = True
-
-        # 마지막 액션 저장 (빠른 반복 실행용)
-        self._last_prompt_key = prompt_key
-        self._last_instruction = instruction
-
-        logger.info(f"Action requested: {prompt_key}")
-
-        # 별도 스레드에서 AI 호출
-        threading.Thread(
-            target=self._process_ai_request,
-            args=(prompt_key, text, instruction),
-            daemon=True
-        ).start()
-
-    def _process_ai_request(self, prompt_key: str, text: str, instruction: str):
-        """
-        AI 요청 처리 (별도 스레드)
-
-        Args:
-            prompt_key: 프롬프트 키
-            text: 선택된 텍스트
-            instruction: 사용자 지시사항
-        """
+        if self._shutting_down or self._ai_request_in_progress or not text.strip():
+            return
         try:
-            # 프롬프트 생성
+            # Capture settings and prompts on the GUI thread before starting work.
             messages = self.prompt_manager.get_messages(prompt_key, text, instruction)
             temperature = self.prompt_manager.get_temperature(prompt_key)
-
-            # 추가 파라미터 가져오기
             additional_params = self.config_manager.get("api.additional_params", {})
+        except Exception as exc:
+            self._show_error_dialog("Invalid Action", str(exc))
+            return
 
-            logger.debug(f"Calling AI: {len(messages)} messages, temp={temperature}")
+        self._ai_request_in_progress = True
+        self._last_prompt_key = prompt_key
+        self._last_instruction = instruction
+        self._request_thread = threading.Thread(
+            target=self._process_ai_request,
+            args=(messages, temperature, additional_params),
+            daemon=True,
+        )
+        try:
+            self._request_thread.start()
+        except Exception as exc:
+            self._ai_request_in_progress = False
+            self._show_error_dialog("AI Request Failed", str(exc))
 
-            # AI 호출
-            response = self.ai_provider.complete(
-                messages, temperature, None, additional_params
-            )
-
-            logger.info(f"AI response received (length: {len(response)})")
-
-            # Signal로 메인 스레드에서 텍스트 교체 (스레드 안전)
-            self._replace_text_signal.emit(response)
-
-        except Exception as e:
-            logger.error(f"Error processing AI request: {e}", exc_info=True)
-            # Signal로 메인 스레드에 에러 전달
-            self.error_occurred.emit(
-                "AI Request Failed",
-                f"Failed to process AI request:\n\n{type(e).__name__}: {e}\n\nPlease check your API configuration."
-            )
+    def _process_ai_request(self, messages, temperature, additional_params):
+        response, error = "", ""
+        try:
+            response = self.ai_provider.complete(messages, temperature, None, additional_params)
+        except Exception as exc:
+            logger.error("AI request failed", exc_info=True)
+            error = f"{type(exc).__name__}: {exc}"
         finally:
-            with self._ai_request_lock:
-                self._ai_request_in_progress = False
+            if self._shutting_down:
+                self.ai_provider.close()
+            else:
+                self._ai_completed.emit(response, error)
 
-    @Slot(str)
-    def _do_replace_text(self, response: str):
-        """메인 스레드에서 텍스트 교체 수행"""
-        self.text_processor.replace_text(response)
+    @Slot(str, str)
+    def _on_ai_completed(self, response: str, error: str):
+        if self._shutting_down:
+            return
+        if error:
+            self._ai_request_in_progress = False
+            self._show_error_dialog("AI Request Failed", error)
+            return
+        if not response.strip():
+            self._ai_request_in_progress = False
+            self._show_error_dialog("AI Request Failed", "The API returned an empty response.")
+            return
+        # Keep the request busy until clipboard replacement finishes or fails.
+        self._pending_response = response
+        try:
+            self.text_processor.replace_text(response)
+        except Exception as exc:
+            self._on_text_operation_failed(str(exc))
 
     @Slot()
     def _on_text_replaced(self):
-        """텍스트 대체 완료 시"""
+        self._pending_response = ""
+        self._ai_request_in_progress = False
         logger.info("Text replacement completed")
-        # 알림 제거 (불필요한 UX)
+
+    @Slot(str)
+    def _on_text_operation_failed(self, message: str):
+        self._ai_request_in_progress = False
+        self._extraction_in_progress = False
+        self._quick_mode = False
+        if not self._shutting_down:
+            self._show_error_dialog("Text Operation Failed", message)
 
     def _show_settings(self):
         """설정 창 표시"""
+        if self._shutting_down:
+            return
+        if self._ai_request_in_progress or self._extraction_in_progress:
+            self.tray_manager.show_message("Quill is busy", "Wait for the current text operation to finish before changing settings.")
+            return
         logger.debug("Showing settings window")
 
         # 기존 창 정리
@@ -507,48 +508,25 @@ class QuillApp(QApplication):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
-            logger.info("Quitting application - performing cleanup")
-
-            # 1. Hotkey 리스너 중지
-            self.hotkey_manager.stop()
-
-            # 2. AI Provider 클라이언트 닫기
-            self.ai_provider.close()
-
-            # 3. 트레이 숨기기
-            self.tray_manager.hide()
-
-            # 4. Popup 창 정리
-            if self.popup_window is not None:
-                try:
-                    self.popup_window.action_requested.disconnect(self._on_action_requested)
-                except RuntimeError:
-                    pass
-                self.popup_window.close()
-                self.popup_window.deleteLater()
-                self.popup_window = None
-
-            # 5. Settings 창 정리
-            if self.settings_window is not None:
-                try:
-                    self.settings_window.settings_saved.disconnect(self._on_settings_saved)
-                except RuntimeError:
-                    pass
-                self.settings_window.close()
-                self.settings_window.deleteLater()
-                self.settings_window = None
-
-            # 6. Onboarding 창 정리
-            if self.onboarding_window is not None:
-                self.onboarding_window.close()
-                self.onboarding_window.deleteLater()
-                self.onboarding_window = None
-
-            # 7. TextProcessor 정리
-            self.text_processor.cleanup()
-
-            logger.info("Cleanup complete, exiting")
             self.quit()
+
+    @Slot()
+    def _cleanup(self):
+        """Release resources on every exit path, including startup failures."""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        self.hotkey_manager.stop()
+        self.text_processor.cleanup()
+        self.tray_manager.hide()
+        for window in (self.popup_window, self.settings_window, self.onboarding_window):
+            if window is not None:
+                window.hide()
+        # Never close an HTTP client while its request is still running.
+        # A live worker closes it in its finally block instead.
+        if self._request_thread is None or not self._request_thread.is_alive():
+            self.ai_provider.close()
+        logger.info("Cleanup complete")
 
     @Slot(str, str)
     def _show_error_dialog(self, title: str, message: str):
@@ -559,7 +537,21 @@ class QuillApp(QApplication):
             title: 에러 제목
             message: 에러 메시지
         """
-        QMessageBox.critical(None, title, message)
+        response = getattr(self, "_pending_response", "")
+        if title == "Text Operation Failed" and response:
+            dialog = QMessageBox()
+            dialog.setIcon(QMessageBox.Icon.Warning)
+            dialog.setWindowTitle(title)
+            dialog.setText(message)
+            dialog.setInformativeText("Your AI response is available below. You can copy it and paste it manually.")
+            dialog.setDetailedText(response)
+            dialog.setStandardButtons(QMessageBox.StandardButton.Close)
+            copy_button = dialog.addButton("Copy Response", QMessageBox.ButtonRole.ActionRole)
+            copy_button.clicked.connect(lambda: self.clipboard().setText(response))
+            dialog.exec()
+            self._pending_response = ""
+        else:
+            QMessageBox.critical(None, title, message)
 
 
 # 테스트용 진입점 (실제로는 main.py에서 실행)

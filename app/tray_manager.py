@@ -110,7 +110,9 @@ class TrayManager(QObject):
             icon = QIcon(str(icon_path))
 
         # 트레이 아이콘 생성
-        self.tray_icon = QSystemTrayIcon(icon)
+        if icon.isNull():
+            icon = self._create_default_icon()
+        self.tray_icon = QSystemTrayIcon(icon, self)
         self.tray_icon.setToolTip("Quill - AI Writing Assistant")
 
         # 메뉴 생성
@@ -135,7 +137,7 @@ class TrayManager(QObject):
         self.tray_menu.addSeparator()
 
         # Pause/Resume 액션 (parent 지정)
-        self.action_pause = QAction("Pause", self.tray_menu)
+        self.action_pause = QAction("Resume" if self.is_paused else "Pause", self.tray_menu)
         self.action_pause.triggered.connect(self._on_pause_clicked)
         self.tray_menu.addAction(self.action_pause)
 

@@ -1,286 +1,142 @@
-"""
-OAI Compatible API Provider
-
-OpenAI Chat Completions API 호환 엔드포인트를 호출합니다.
-OpenAI, llama.cpp, KoboldCPP, Ollama 등 모든 호환 서비스 지원.
-"""
+"""Synchronous client for OpenAI-compatible Chat Completions endpoints."""
 
 import logging
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
-
 logger = logging.getLogger(__name__)
+RESERVED_PARAMS = frozenset({"model", "messages", "stream"})
+
+
+def validate_api_url(base_url: str) -> str:
+    """Return a normalized HTTP(S) base URL or raise a useful input error."""
+    if not isinstance(base_url, str):
+        raise ValueError("Base URL must be a string")
+    value = base_url.strip().rstrip("/")
+    try:
+        parsed = urlsplit(value)
+        valid = parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+        # Accessing port also validates malformed/out-of-range ports.
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("Base URL has an invalid host or port") from exc
+    if (not valid or any(character.isspace() for character in value)
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment or "?" in value or "#" in value):
+        raise ValueError("Base URL must be an HTTP(S) URL without credentials, query, or fragment")
+    return value
 
 
 class OAICompatibleProvider:
-    """OpenAI Compatible API Provider"""
+    """Reuse one HTTP connection pool for a configured API endpoint."""
 
     def __init__(self):
-        """OAICompatibleProvider 초기화"""
         self.base_url: Optional[str] = None
         self.api_key: Optional[str] = None
         self.model: str = "gpt-4"
         self.client: Optional[httpx.Client] = None
-        self.timeout: float = 60.0  # 60초 타임아웃
-
-        logger.debug("OAICompatibleProvider initialized")
+        self.timeout: float = 60.0
 
     def configure(self, base_url: str, api_key: str, model: str) -> None:
-        """
-        API 설정
-
-        Args:
-            base_url: API base URL (예: https://api.openai.com/v1)
-            api_key: API 키
-            model: 모델 이름 (예: gpt-4, gpt-3.5-turbo)
-        """
-        # 기존 클라이언트 정리 (연결 누수 방지)
-        if self.client is not None:
-            try:
-                self.client.close()
-                logger.debug("Previous httpx client closed")
-            except Exception as e:
-                logger.warning(f"Error closing previous client: {e}")
-            self.client = None
-
-        # URL 정규화 (끝에 슬래시 제거)
-        self.base_url = base_url.rstrip('/')
-        self.api_key = api_key
-        self.model = model
-
-        # httpx 클라이언트 초기화
-        headers = {
-            "Content-Type": "application/json"
-        }
-
-        # API 키가 있으면 Authorization 헤더 추가
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        self.client = httpx.Client(
-            base_url=self.base_url,
-            headers=headers,
-            timeout=self.timeout
-        )
-
-        logger.info(f"Configured API: {self.base_url}, model: {self.model}")
+        base_url = validate_api_url(base_url)
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("Model cannot be empty")
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        # Construct first so invalid new settings do not destroy a working client.
+        client = httpx.Client(base_url=base_url, headers=headers, timeout=self.timeout)
+        self.close()
+        self.base_url, self.api_key, self.model = base_url, api_key, model.strip()
+        self.client = client
+        logger.info("Configured API endpoint, model: %s", self.model)
 
     def is_configured(self) -> bool:
-        """
-        API가 설정되어 있는지 확인
-
-        Returns:
-            설정 완료 여부
-        """
-        return self.client is not None
+        return self.client is not None and not self.client.is_closed
 
     def complete(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
-        additional_params: Optional[Dict[str, Any]] = None
+        additional_params: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """
-        채팅 완성 API 호출 (비스트리밍)
-
-        Args:
-            messages: OpenAI messages 형식
-                [{"role": "system", "content": "..."},
-                 {"role": "user", "content": "..."}]
-            temperature: 온도 (0.0~2.0, 기본값 0.7)
-            max_tokens: 최대 토큰 수 (None이면 제한 없음)
-            additional_params: 추가 파라미터 (reasoning_effort, top_p 등)
-
-        Returns:
-            AI 응답 텍스트
-
-        Raises:
-            RuntimeError: API 호출 실패 시
-            ValueError: API 미설정 시
-        """
         if not self.is_configured():
             raise ValueError("API provider not configured. Call configure() first.")
+        if additional_params is not None and not isinstance(additional_params, dict):
+            raise ValueError("Additional parameters must be a JSON object")
+        if additional_params and RESERVED_PARAMS.intersection(additional_params):
+            raise ValueError("Additional parameters cannot override model, messages, or stream")
+        payload = {
+            "model": self.model, "messages": messages,
+            "temperature": temperature, "stream": False,
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if additional_params:
+            payload.update(additional_params)
 
         try:
-            # 요청 페이로드 구성
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "temperature": temperature,
-                "stream": False  # 비스트리밍
-            }
-
-            if max_tokens is not None:
-                payload["max_tokens"] = max_tokens
-
-            # 추가 파라미터 병합
-            if additional_params:
-                payload.update(additional_params)
-
-            logger.debug(f"Calling API: {self.base_url}/chat/completions")
-            logger.debug(f"Model: {self.model}, messages count: {len(messages)}")
-
-            # API 호출
-            response = self.client.post(
-                "/chat/completions",
-                json=payload
-            )
-
-            # HTTP 에러 확인
+            response = self.client.post("chat/completions", json=payload)
             response.raise_for_status()
-
-            # 응답 파싱
             data = response.json()
-
-            if "choices" not in data or len(data["choices"]) == 0:
-                logger.error(f"Invalid API response: {data}")
-                raise RuntimeError("Invalid API response: no choices")
-
-            content = data["choices"][0]["message"]["content"]
-            logger.info(f"API call successful, response length: {len(content)}")
-
+            choices = data.get("choices") if isinstance(data, dict) else None
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                raise RuntimeError("Invalid API response: no completion choices")
+            choice = choices[0]
+            # Never replace a selection with a truncated/refused answer.
+            if choice.get("finish_reason") in {"length", "content_filter"}:
+                raise RuntimeError("API response was truncated or filtered; original text was preserved")
+            message = choice.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, str) or not content.strip():
+                raise RuntimeError("API response contains no usable text; original text was preserved")
+            logger.info("API call successful, response length: %s", len(content))
             return content
-
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error: {e.response.status_code} - {e.response.text}")
-            error_detail = self._extract_error_message(e.response)
-            raise RuntimeError(f"API error ({e.response.status_code}): {error_detail}") from e
-
-        except httpx.TimeoutException as e:
-            logger.error(f"API request timeout: {e}")
-            raise RuntimeError("API request timeout") from e
-
-        except httpx.RequestError as e:
-            logger.error(f"Request error: {e}")
-            raise RuntimeError(f"Request error: {e}") from e
-
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            raise RuntimeError(f"Unexpected error: {e}") from e
+        except httpx.HTTPStatusError as exc:
+            # Error responses can echo the selected text, so do not log the body.
+            logger.warning("API HTTP error: %s", exc.response.status_code)
+            detail = self._extract_error_message(exc.response)
+            raise RuntimeError(f"API error ({exc.response.status_code}): {detail}") from exc
+        except httpx.TimeoutException as exc:
+            raise RuntimeError("API request timeout") from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"API connection failed ({type(exc).__name__})") from exc
+        except (ValueError, TypeError, KeyError) as exc:
+            raise RuntimeError("Invalid API response: expected a JSON text completion") from exc
 
     def test_connection(self) -> bool:
-        """
-        API 연결 테스트
-
-        Returns:
-            연결 성공 여부
-        """
         if not self.is_configured():
-            logger.warning("Cannot test connection: API not configured")
             return False
-
         try:
-            logger.info("Testing API connection...")
-            test_messages = [
-                {"role": "user", "content": "Hi"}
-            ]
-
-            response = self.complete(test_messages, temperature=0.1)
-            logger.info("Connection test successful")
+            self.complete([{"role": "user", "content": "Hi"}], temperature=0.1)
             return True
-
-        except Exception as e:
-            logger.error(f"Connection test failed: {e}")
+        except Exception:
+            logger.warning("API connection test failed")
             return False
 
     def close(self) -> None:
-        """API 클라이언트 종료"""
-        if self.client:
-            self.client.close()
-            logger.debug("API client closed")
+        client, self.client = self.client, None
+        if client is not None:
+            client.close()
 
     @staticmethod
     def _extract_error_message(response: httpx.Response) -> str:
-        """
-        에러 응답에서 메시지 추출
-
-        Args:
-            response: httpx Response 객체
-
-        Returns:
-            에러 메시지
-        """
         try:
-            error_data = response.json()
-            if "error" in error_data:
-                if isinstance(error_data["error"], dict):
-                    return error_data["error"].get("message", str(error_data["error"]))
-                else:
-                    return str(error_data["error"])
-            return response.text
-        except Exception:
-            return response.text
+            data = response.json()
+            error = data.get("error") if isinstance(data, dict) else None
+            if isinstance(error, dict):
+                return str(error.get("message", "Unknown API error"))[:500]
+            if isinstance(error, str):
+                return error[:500]
+        except ValueError:
+            pass
+        return response.reason_phrase or "Unknown API error"
 
     def __del__(self):
-        """소멸자: 자동으로 클라이언트 종료"""
-        self.close()
-
-
-# 테스트 코드
-if __name__ == "__main__":
-    import os
-
-    logging.basicConfig(level=logging.DEBUG)
-
-    print("\n=== Testing OAICompatibleProvider ===\n")
-
-    # 환경 변수에서 API 키 가져오기 (테스트용)
-    api_key = os.getenv("OPENAI_API_KEY", "")
-
-    if not api_key:
-        print("[WARNING] OPENAI_API_KEY environment variable not set")
-        print("   Set it to test the provider:")
-        print("   export OPENAI_API_KEY=your-api-key")
-        print("\nTesting with mock configuration instead...")
-
-        # Mock 설정 테스트
-        provider = OAICompatibleProvider()
-        assert not provider.is_configured()
-        print("[OK] Initial state: not configured")
-
-        provider.configure(
-            base_url="https://api.openai.com/v1",
-            api_key="sk-test-mock-key",
-            model="gpt-4"
-        )
-        assert provider.is_configured()
-        print("[OK] Configuration successful")
-
-        print("\n[INFO] Skipping actual API call (no real API key)")
-        print("[OK] Basic tests passed!")
-
-    else:
-        # 실제 API 테스트
-        provider = OAICompatibleProvider()
-        provider.configure(
-            base_url="https://api.openai.com/v1",
-            api_key=api_key,
-            model="gpt-3.5-turbo"  # 저렴한 모델로 테스트
-        )
-
-        print("1. Testing simple completion...")
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Say 'Hello, World!' and nothing else."}
-        ]
-
         try:
-            response = provider.complete(messages, temperature=0.1)
-            print(f"   Response: {response}")
-            print("   [OK] Completion test passed!")
-
-        except Exception as e:
-            print(f"   [FAILED] {e}")
-
-        print("\n2. Testing connection...")
-        if provider.test_connection():
-            print("   [OK] Connection test passed!")
-        else:
-            print("   [FAILED] Connection test failed!")
-
-        provider.close()
-
-    print("\n[OK] All provider tests completed!")
+            self.close()
+        except Exception:
+            pass

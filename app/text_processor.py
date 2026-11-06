@@ -1,213 +1,214 @@
-"""
-텍스트 처리기
+"""Copy and replace selected text without blocking the GUI event loop."""
 
-선택된 텍스트를 추출하고 AI 응답으로 대체합니다.
-Worker 패턴: 매 작업마다 새 QThread 생성으로 안정성 확보.
-"""
-
-import time
+import ctypes
 import logging
+import sys
 import threading
+import time
+import uuid
 from typing import Optional
 
 import pyperclip
 from pynput.keyboard import Controller, Key
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 
 
 logger = logging.getLogger(__name__)
 
+if sys.platform == 'win32':
+    _user32 = ctypes.WinDLL('user32', use_last_error=True)
+    _user32.GetForegroundWindow.restype = ctypes.c_void_p
+
+
+def _foreground_window():
+    """Return a pointer-sized HWND; an unknown target must never receive a paste."""
+    if sys.platform == 'win32':
+        return _user32.GetForegroundWindow()
+    return None
+
 
 class TextWorker(QObject):
-    """텍스트 작업 Worker (QThread에서 실행)"""
-
-    # Signals
     text_extracted = Signal(str)
     text_replaced = Signal()
+    operation_failed = Signal(str)
     finished = Signal()
 
     def __init__(self):
         super().__init__()
         self.keyboard = Controller()
         self.operation: Optional[str] = None
-        self.replacement_text: str = ""
-        self.sleep_duration: float = 0.1
+        self.replacement_text = ''
+        self.expected_text = ''
+        self.target_window = None
+        self.sleep_duration = 0.5  # Upper bound; ordinary copies complete immediately.
+        self.done = threading.Event()
 
     @Slot()
     def run(self):
-        """작업 실행"""
-        logger.debug(f"TextWorker.run() called, operation={self.operation}")
         try:
             if self.operation == 'extract':
                 self._extract()
             elif self.operation == 'replace':
                 self._replace()
-        except Exception as e:
-            logger.error(f"Error in TextWorker: {e}")
         finally:
+            self.done.set()
             self.finished.emit()
 
+    def _release_modifiers(self):
+        for key in (Key.ctrl, Key.alt, Key.shift, Key.cmd):
+            self.keyboard.release(key)
+        time.sleep(0.03)
+
+    def _shortcut(self, key):
+        with self.keyboard.pressed(Key.ctrl):
+            self.keyboard.press(key)
+            self.keyboard.release(key)
+
+    def _check_target(self):
+        if not self.target_window or _foreground_window() != self.target_window:
+            raise RuntimeError('The active window changed. Select the text again before retrying.')
+
+    def _copy_selection(self):
+        """A verified non-NUL marker distinguishes a new copy, including identical text."""
+        marker = 'QUILL_CLIPBOARD_' + uuid.uuid4().hex
+        pyperclip.copy(marker)
+        if pyperclip.paste() != marker:
+            raise RuntimeError('Could not prepare the clipboard. Please retry.')
+        self._check_target()
+        self._shortcut('c')
+        deadline = time.monotonic() + self.sleep_duration
+        while True:
+            value = pyperclip.paste()
+            if value != marker:
+                self._check_target()
+                return value
+            if time.monotonic() >= deadline:
+                return ''
+            time.sleep(0.01)
+
     def _extract(self):
-        """텍스트 추출 (Ctrl+C 시뮬레이션)"""
+        original = None
+        selected = ''
         try:
-            # 0. 모든 modifier 키 해제 (핫키로 눌려있을 수 있음)
-            # Ctrl+Alt+Space 같은 핫키를 누른 상태에서 Ctrl+C를 시뮬레이션하면
-            # 실제로는 Ctrl+Alt+C가 전송되어 복사가 안 됨
-            for key in [Key.ctrl, Key.alt, Key.shift, Key.cmd]:
+            self._check_target()
+            self._release_modifiers()
+            original = pyperclip.paste()
+            selected = self._copy_selection()
+        except Exception as exc:
+            logger.warning('Text extraction failed: %s', exc)
+            self.operation_failed.emit(str(exc))
+        finally:
+            if original is not None:
                 try:
-                    self.keyboard.release(key)
-                except Exception:
-                    pass
-            time.sleep(0.05)  # 키 해제 대기
-
-            # 1. 클립보드 백업
-            original_clipboard = pyperclip.paste()
-            logger.debug(f"Clipboard backed up (length: {len(original_clipboard)})")
-
-            # 2. 클립보드를 마커로 설정 (동일 텍스트 재선택 감지용)
-            marker = "\x00QUILL_MARKER\x00"
-            pyperclip.copy(marker)
-
-            # 3. Ctrl+C 시뮬레이션
-            with self.keyboard.pressed(Key.ctrl):
-                self.keyboard.press('c')
-                self.keyboard.release('c')
-
-            # 4. 클립보드 업데이트 대기
-            time.sleep(self.sleep_duration)
-
-            # 5. 클립보드에서 텍스트 가져오기
-            selected_text = pyperclip.paste()
-
-            # 6. 클립보드 복원
-            pyperclip.copy(original_clipboard)
-
-            # 7. 마커가 아닌 텍스트가 있는지 확인
-            if selected_text and selected_text != marker:
-                logger.info(f"Text extracted successfully (length: {len(selected_text)})")
-                self.text_extracted.emit(selected_text)
-            else:
-                logger.debug("No text selected (clipboard unchanged)")
-                self.text_extracted.emit("")
-
-        except Exception as e:
-            logger.error(f"Error extracting text: {e}")
-            self.text_extracted.emit("")
+                    pyperclip.copy(original)
+                except Exception as exc:
+                    logger.warning('Clipboard restoration failed: %s', exc)
+                    selected = ''
+                    self.operation_failed.emit('Could not restore the clipboard. Please retry.')
+            self.text_extracted.emit(selected)
 
     def _replace(self):
-        """텍스트 대체 (Ctrl+V 시뮬레이션)"""
+        original = None
+        replacement_written = False
+        succeeded = False
         try:
-            # 1. 클립보드 백업
-            original_clipboard = pyperclip.paste()
-            logger.debug("Clipboard backed up for replacement")
-
-            # 2. 새 텍스트를 클립보드에 복사 (끝의 공백/줄바꿈 제거)
-            cleaned_text = self.replacement_text.rstrip()
-            pyperclip.copy(cleaned_text)
-            logger.debug(f"New text copied to clipboard (length: {len(cleaned_text)})")
-
-            # 3. 짧은 대기 (클립보드 업데이트 보장)
-            time.sleep(0.05)
-
-            # 4. Ctrl+V 시뮬레이션
-            with self.keyboard.pressed(Key.ctrl):
-                self.keyboard.press('v')
-                self.keyboard.release('v')
-
-            # 5. 붙여넣기 완료 대기
-            time.sleep(0.05)
-
-            # 6. 클립보드 복원
-            pyperclip.copy(original_clipboard)
-            logger.info("Text replaced successfully")
-
-            # 7. Signal 발생
-            self.text_replaced.emit()
-
-        except Exception as e:
-            logger.error(f"Error replacing text: {e}")
+            if not self.replacement_text or not self.replacement_text.strip():
+                raise RuntimeError('The response is empty; the selected text was kept.')
+            if not self.expected_text:
+                raise RuntimeError('No original selection is available. Please select the text again.')
+            self._check_target()
+            self._release_modifiers()
+            original = pyperclip.paste()
+            if self._copy_selection() != self.expected_text:
+                raise RuntimeError('The selected text changed. Select it again before retrying.')
+            self._check_target()
+            # Preserve response whitespace: it can be meaningful in code and prose.
+            pyperclip.copy(self.replacement_text)
+            replacement_written = True
+            if pyperclip.paste() != self.replacement_text:
+                raise RuntimeError('Could not copy the response to the clipboard. Please retry.')
+            self._check_target()
+            self._shortcut('v')
+            time.sleep(0.15)  # Give the receiving application time to consume Ctrl+V.
+            succeeded = True
+        except Exception as exc:
+            logger.warning('Text replacement failed: %s', exc)
+            self.operation_failed.emit(str(exc))
+        finally:
+            if original is not None:
+                try:
+                    # Do not overwrite a clipboard update made after our paste.
+                    if not replacement_written or pyperclip.paste() == self.replacement_text:
+                        pyperclip.copy(original)
+                except Exception as exc:
+                    logger.warning('Clipboard restoration failed: %s', exc)
+                    self.operation_failed.emit('Could not restore the clipboard. Please retry.')
+            if succeeded:
+                self.text_replaced.emit()
 
 
 class TextProcessor(QObject):
-    """텍스트 처리 매니저 - 매 작업마다 새 Worker/Thread 생성"""
-
-    # 외부로 전달하는 Signals (기존 API 유지)
     text_extracted = Signal(str)
     text_replaced = Signal()
+    operation_failed = Signal(str)
 
     def __init__(self):
         super().__init__()
         self._thread: Optional[QThread] = None
         self._worker: Optional[TextWorker] = None
-        self._lock = threading.Lock()
+        self._target_window = None
+        self._selected_text = ''
+        self._closed = False
 
-        # 워밍업: 클립보드 접근 초기화 (첫 호출 지연 제거)
-        try:
-            pyperclip.paste()
-        except Exception:
-            pass
-
-        logger.debug("TextProcessor initialized")
-
-    def _cleanup_previous(self):
-        """이전 작업 정리"""
+    def _cleanup_previous(self, wait=False):
         if self._thread is not None:
             if self._thread.isRunning():
+                if not wait and not self._worker.done.is_set():
+                    return False
                 self._thread.quit()
-                self._thread.wait(1000)  # 1초 타임아웃
+                # Never destroy a running QThread. Worker operations are bounded.
+                self._thread.wait()
             self._thread.deleteLater()
             self._thread = None
-
-        if self._worker is not None:
-            self._worker.deleteLater()
             self._worker = None
+        return True
 
-    def _start_operation(self, operation: str, replacement_text: str = ""):
-        """새 작업 시작"""
-        logger.debug(f"Starting operation: {operation}")
-        with self._lock:
-            self._cleanup_previous()
+    def _start_operation(self, operation, replacement_text=''):
+        if self._closed or not self._cleanup_previous():
+            self.operation_failed.emit('Another clipboard operation is in progress. Please retry.')
+            if operation == 'extract':
+                self.text_extracted.emit('')
+            return
+        if operation == 'extract':
+            self._target_window = _foreground_window()
+            self._selected_text = ''
 
-            # 새 Worker와 Thread 생성
-            self._worker = TextWorker()
-            self._thread = QThread()
-
-            # Worker 설정
-            self._worker.operation = operation
-            self._worker.replacement_text = replacement_text
-
-            # Worker를 Thread로 이동
-            self._worker.moveToThread(self._thread)
-
-            # Signal 연결
-            self._thread.started.connect(self._worker.run)
-            self._worker.text_extracted.connect(self._on_text_extracted)
-            self._worker.text_replaced.connect(self._on_text_replaced)
-            self._worker.finished.connect(self._thread.quit)
-
-            # Thread 시작
-            self._thread.start()
+        worker = self._worker = TextWorker()
+        thread = self._thread = QThread()
+        worker.operation = operation
+        worker.replacement_text = replacement_text
+        worker.expected_text = self._selected_text
+        worker.target_window = self._target_window
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.text_extracted.connect(self._on_text_extracted)
+        worker.text_replaced.connect(self.text_replaced)
+        worker.operation_failed.connect(self.operation_failed)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.start()
 
     @Slot(str)
-    def _on_text_extracted(self, text: str):
-        """Worker에서 추출 완료 시 외부로 전달"""
+    def _on_text_extracted(self, text):
+        self._selected_text = text
         self.text_extracted.emit(text)
 
-    @Slot()
-    def _on_text_replaced(self):
-        """Worker에서 대체 완료 시 외부로 전달"""
-        self.text_replaced.emit()
-
     def extract_selected_text(self):
-        """선택된 텍스트 추출 (Ctrl+C 시뮬레이션)"""
         self._start_operation('extract')
 
-    def replace_text(self, new_text: str):
-        """텍스트 대체 (Ctrl+V 시뮬레이션)"""
+    def replace_text(self, new_text):
         self._start_operation('replace', new_text)
 
     def cleanup(self):
-        """리소스 정리"""
-        with self._lock:
-            self._cleanup_previous()
-        logger.debug("TextProcessor cleaned up")
+        self._closed = True
+        self._cleanup_previous(wait=True)

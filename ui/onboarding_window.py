@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal
 
 from ui.styles import apply_dark_theme
+from core.ai_provider import validate_api_url
 
 
 logger = logging.getLogger(__name__)
@@ -117,13 +118,10 @@ class OnboardingWindow(QDialog):
         api_key = self.input_api_key.text().strip()
         model = self.input_model.text().strip()
 
-        # 유효성 검사
-        if not base_url:
-            QMessageBox.warning(
-                self,
-                "Invalid Input",
-                "Please enter a Base URL."
-            )
+        try:
+            base_url = validate_api_url(base_url)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid Input", str(exc))
             self.input_base_url.setFocus()
             return
 
@@ -150,7 +148,7 @@ class OnboardingWindow(QDialog):
                 self.input_api_key.setFocus()
                 return
 
-        logger.info(f"Onboarding completed: {base_url}, model: {model}")
+        logger.info("Onboarding API settings submitted")
 
         # Signal 발생
         self.setup_completed.emit(base_url, api_key, model)

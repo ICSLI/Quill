@@ -51,9 +51,10 @@ def main():
 
     logger = logging.getLogger(__name__)
 
+    lock = None
     try:
-        # 단일 인스턴스 체크
         lock = SingleInstanceLock()
+        # 단일 인스턴스 체크
         if not lock.acquire():
             logger.warning("Another instance of Quill is already running")
             # GUI 에러 메시지 표시
@@ -75,7 +76,6 @@ def main():
         exit_code = app.exec()
 
         # Lock 해제
-        lock.release()
         sys.exit(exit_code)
 
     except KeyboardInterrupt:
@@ -85,6 +85,9 @@ def main():
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 if __name__ == "__main__":

@@ -6,15 +6,18 @@ API 설정, 단축키 설정 등을 관리합니다.
 
 import json
 import logging
+from copy import deepcopy
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QGroupBox, QFormLayout,
     QMessageBox, QTabWidget, QWidget, QComboBox,
-    QTextEdit
+    QTextEdit, QCheckBox
 )
 from PySide6.QtCore import Signal
 
 from ui.styles import apply_dark_theme
+from core.ai_provider import validate_api_url, RESERVED_PARAMS
+from app.hotkey_manager import validate_hotkeys
 
 
 logger = logging.getLogger(__name__)
@@ -95,6 +98,9 @@ class SettingsWindow(QDialog):
         self.config_manager = config_manager
         self.crypto_manager = crypto_manager
         self.prompt_manager = prompt_manager
+        self._prompt_drafts = deepcopy(prompt_manager.prompts) if prompt_manager else {}
+        self._current_prompt_key = None
+        self._reset_prompt_keys = set()
 
         self.setWindowTitle("Quill - Settings")
         self.setModal(True)
@@ -170,6 +176,9 @@ class SettingsWindow(QDialog):
         self.input_api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.input_api_key.setPlaceholderText("Optional (leave empty to keep current)")
         api_layout.addRow("API Key:", self.input_api_key)
+        self.clear_api_key = QCheckBox("Remove saved API key")
+        self.clear_api_key.toggled.connect(self.input_api_key.setDisabled)
+        api_layout.addRow("", self.clear_api_key)
 
         # Model
         self.input_model = QLineEdit()
@@ -278,6 +287,7 @@ class SettingsWindow(QDialog):
         # 도움말
         help_label = QLabel(
             "Use {{text}} and {{instruction}} as variables.\n"
+            "Changes are saved when you click Save. Cancel discards them.\n"
             "Custom prompt name cannot be changed."
         )
         help_label.setObjectName("subtitleLabel")
@@ -293,11 +303,6 @@ class SettingsWindow(QDialog):
         prompt_btn_layout.addWidget(self.btn_reset_prompt)
 
         prompt_btn_layout.addStretch()
-
-        # Apply Changes 버튼
-        self.btn_apply_prompt = QPushButton("Apply Changes")
-        self.btn_apply_prompt.clicked.connect(self._on_apply_prompt)
-        prompt_btn_layout.addWidget(self.btn_apply_prompt)
 
         layout.addLayout(prompt_btn_layout)
 
@@ -315,7 +320,7 @@ class SettingsWindow(QDialog):
             return
 
         try:
-            prompts = self.prompt_manager.prompts
+            prompts = self._prompt_drafts
 
             self.prompt_combo.clear()
             for key, prompt in prompts.items():
@@ -328,113 +333,48 @@ class SettingsWindow(QDialog):
             logger.error(f"Error loading prompts: {e}")
 
     def _on_prompt_selected(self, index):
-        """프롬프트 선택 시"""
+        """Keep edits when changing prompts without touching live settings."""
         if index < 0 or not self.prompt_manager:
             return
-
-        try:
-            prompt_key = self.prompt_combo.itemData(index)
-            prompt = self.prompt_manager.prompts.get(prompt_key)
-
-            if prompt:
-                # Populate edit fields
-                self.prompt_name_edit.setText(prompt.get("name", ""))
-                self.prompt_temp_edit.setText(str(prompt.get("temperature", 0.7)))
-                self.prompt_template_edit.setPlainText(prompt.get("template", ""))
-
-                # Disable name editing for "custom" prompt
-                is_custom = (prompt_key == "custom")
-                self.prompt_name_edit.setReadOnly(is_custom)
-
-        except Exception as e:
-            logger.error(f"Error displaying prompt: {e}")
-
-    def _on_apply_prompt(self):
-        """Apply Changes 버튼 클릭 시 - 현재 프롬프트 저장"""
-        if not self._save_current_prompt():
+        if self._current_prompt_key is not None and not self._save_current_prompt():
+            self.prompt_combo.blockSignals(True)
+            self.prompt_combo.setCurrentIndex(self.prompt_combo.findData(self._current_prompt_key))
+            self.prompt_combo.blockSignals(False)
             return
-
-        QMessageBox.information(
-            self,
-            "Applied",
-            "Prompt changes applied."
-        )
+        self._current_prompt_key = self.prompt_combo.itemData(index)
+        prompt = self._prompt_drafts[self._current_prompt_key]
+        self.prompt_name_edit.setText(prompt.get("name", ""))
+        self.prompt_temp_edit.setText(str(prompt.get("temperature", 0.7)))
+        self.prompt_template_edit.setPlainText(prompt.get("template", ""))
+        self.prompt_name_edit.setReadOnly(self._current_prompt_key == "custom")
 
     def _save_current_prompt(self) -> bool:
-        """현재 프롬프트 저장 (검증 포함). 성공 시 True 반환."""
-        if not self.prompt_manager:
-            return True  # prompt_manager 없으면 그냥 통과
-
-        try:
-            # Get current selected prompt
-            current_index = self.prompt_combo.currentIndex()
-            if current_index < 0:
-                return True  # 선택된 프롬프트 없으면 통과
-
-            prompt_key = self.prompt_combo.itemData(current_index)
-
-            # Get new values
-            new_name = self.prompt_name_edit.text().strip()
-            temp_str = self.prompt_temp_edit.text().strip()
-            new_template = self.prompt_template_edit.toPlainText()
-
-            # Validate name
-            if not new_name and prompt_key != "custom":
-                QMessageBox.warning(
-                    self,
-                    "Invalid Name",
-                    "Prompt name cannot be empty."
-                )
-                return False
-
-            # Validate template
-            if not new_template.strip():
-                QMessageBox.warning(
-                    self,
-                    "Invalid Template",
-                    "Template cannot be empty."
-                )
-                return False
-
-            # Validate and parse temperature
-            try:
-                new_temp = float(temp_str)
-                if not (0.0 <= new_temp <= 2.0):
-                    raise ValueError("Temperature must be between 0.0 and 2.0")
-            except ValueError as e:
-                QMessageBox.warning(
-                    self,
-                    "Invalid Temperature",
-                    f"Please enter a valid temperature value (0.0 - 2.0).\n{e}"
-                )
-                return False
-
-            # Update prompt
-            self.prompt_manager.update_prompt(
-                prompt_key,
-                name=new_name if prompt_key != "custom" else None,
-                template=new_template,
-                temperature=new_temp
-            )
-
-            # Save to file
-            self.prompt_manager.save()
-
-            # Update combo display (only if name changed and not custom)
-            if prompt_key != "custom" and new_name:
-                self.prompt_combo.setItemText(current_index, new_name)
-
-            logger.info(f"Prompt {prompt_key} saved successfully")
+        """Validate and stage the visible prompt without writing user data."""
+        prompt_key = self._current_prompt_key
+        if not self.prompt_manager or prompt_key is None:
             return True
-
-        except Exception as e:
-            logger.error(f"Error saving prompt: {e}")
-            QMessageBox.critical(
-                self,
-                "Error",
-                f"Failed to save prompt: {e}"
-            )
+        try:
+            name = self.prompt_name_edit.text().strip()
+            template = self.prompt_template_edit.toPlainText()
+            if not name:
+                raise ValueError("Prompt name cannot be empty.")
+            if not template.strip():
+                raise ValueError("Template cannot be empty.")
+            temperature = float(self.prompt_temp_edit.text().strip())
+            if not 0.0 <= temperature <= 2.0:
+                raise ValueError("Temperature must be between 0.0 and 2.0.")
+            if self.prompt_manager.parser.is_chatml(template):
+                self.prompt_manager.parser.parse(template)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid Prompt", str(exc))
             return False
+        draft = self._prompt_drafts[prompt_key]
+        if prompt_key != "custom":
+            draft["name"] = name
+        draft["template"] = template
+        draft["temperature"] = temperature
+        self.prompt_combo.setItemText(self.prompt_combo.findData(prompt_key), draft["name"])
+        return True
 
     def _on_reset_prompt(self):
         """Reset to Default 버튼 클릭 시"""
@@ -477,8 +417,8 @@ class SettingsWindow(QDialog):
                 return
 
             # 기본값으로 리셋
-            self.prompt_manager.reset_prompt(prompt_key)
-            self.prompt_manager.save()
+            self._prompt_drafts[prompt_key] = deepcopy(self.prompt_manager.default_prompts[prompt_key])
+            self._reset_prompt_keys.add(prompt_key)
 
             # UI 업데이트
             default_prompt = self.prompt_manager.default_prompts[prompt_key]
@@ -494,7 +434,7 @@ class SettingsWindow(QDialog):
             QMessageBox.information(
                 self,
                 "Reset Complete",
-                "Prompt has been reset to default."
+                "Prompt reset in this dialog. Click Save to save the changes."
             )
 
         except Exception as e:
@@ -508,8 +448,6 @@ class SettingsWindow(QDialog):
     def _load_current_settings(self):
         """현재 설정 로드"""
         try:
-            config = self.config_manager.get_all()
-
             # API 설정
             self.input_base_url.setText(
                 self.config_manager.get("api.base_url", "")
@@ -544,137 +482,78 @@ class SettingsWindow(QDialog):
             )
 
     def _on_save(self):
-        """저장 버튼 클릭 시"""
+        """Validate the entire form before changing any live settings."""
         try:
-            # 프롬프트 저장 (Prompts 탭이 있는 경우)
-            if self.prompt_manager and not self._save_current_prompt():
-                return
-
-            # API 설정 저장
-            base_url = self.input_base_url.text().strip()
-            api_key = self.input_api_key.text().strip()
+            base_url = validate_api_url(self.input_base_url.text().strip())
             model = self.input_model.text().strip()
-
-            if not base_url or not model:
-                QMessageBox.warning(
-                    self,
-                    "Invalid Input",
-                    "Please fill in Base URL and Model."
-                )
-                return
-
-            # Additional Parameters 파싱
+            if not model:
+                raise ValueError("Please enter a Model name.")
             params_text = self.input_additional_params.toPlainText().strip()
-            additional_params = {}
-            if params_text:
-                try:
-                    additional_params = json.loads(params_text)
-                    if not isinstance(additional_params, dict):
-                        raise ValueError("Must be a JSON object")
-                except (json.JSONDecodeError, ValueError) as e:
-                    QMessageBox.warning(
-                        self,
-                        "Invalid JSON",
-                        f"Additional Parameters must be valid JSON object.\n\nError: {e}"
-                    )
-                    return
+            additional_params = json.loads(params_text) if params_text else {}
+            if not isinstance(additional_params, dict):
+                raise ValueError("Additional Parameters must be a JSON object.")
+            # The request envelope belongs to Quill, rather than extra API options.
+            reserved = RESERVED_PARAMS.intersection(additional_params)
+            if reserved:
+                raise ValueError("Additional Parameters cannot override: " + ", ".join(sorted(reserved)))
+            json.dumps(additional_params, allow_nan=False)
+            hotkey = self.input_hotkey.get_key_sequence()
+            quick_hotkey = self.input_quick_hotkey.get_key_sequence()
+            validate_hotkeys(hotkey, quick_hotkey)
+        except (ValueError, TypeError) as exc:
+            QMessageBox.warning(self, "Invalid Settings", str(exc))
+            return
 
-            # ConfigManager에 저장
+        if self.prompt_manager and not self._save_current_prompt():
+            return
+        config_before = deepcopy(self.config_manager.get_all())
+        prompts_before = deepcopy(self.prompt_manager.prompts) if self.prompt_manager else None
+        user_prompts_before = deepcopy(self.prompt_manager.user_prompts) if self.prompt_manager else None
+        prompts_saved = False
+        try:
             self.config_manager.set("api.base_url", base_url)
             self.config_manager.set("api.model", model)
             self.config_manager.set("api.additional_params", additional_params)
-
-            # API 키는 입력된 경우에만 업데이트
-            if api_key:
+            api_key = self.input_api_key.text().strip()
+            if self.clear_api_key.isChecked():
+                self.config_manager.set("api.api_key_encrypted", "")
+            elif api_key:
                 self.config_manager.set_api_key(api_key)
-
-            # 핫키 저장
-            hotkey = self.input_hotkey.get_key_sequence()
-            if hotkey:
-                # Validate hotkey has at least one modifier
-                if not any(mod in hotkey for mod in ['<ctrl>', '<shift>', '<alt>']):
-                    QMessageBox.warning(
-                        self,
-                        "Invalid Hotkey",
-                        "Hotkey must include at least one modifier key (Ctrl, Shift, or Alt)."
-                    )
-                    return
-
-                # Validate against critical system hotkeys only
-                critical_hotkeys = [
-                    '<alt>+<f4>',  # Close window
-                    '<ctrl>+<alt>+<delete>',  # Security screen
-                    '<ctrl>+<shift>+<esc>',  # Task Manager
-                ]
-
-                if hotkey.lower() in critical_hotkeys:
-                    QMessageBox.warning(
-                        self,
-                        "Reserved Hotkey",
-                        f"'{hotkey}' is a critical system hotkey and cannot be used.\n\n"
-                        "Please choose a different combination."
-                    )
-                    return
-
-                self.config_manager.set("hotkey.key", hotkey)
-
-            # 빠른 반복 핫키 저장
-            quick_hotkey = self.input_quick_hotkey.get_key_sequence()
-            if quick_hotkey:
-                # Validate quick hotkey has at least one modifier
-                if not any(mod in quick_hotkey for mod in ['<ctrl>', '<shift>', '<alt>']):
-                    QMessageBox.warning(
-                        self,
-                        "Invalid Quick Hotkey",
-                        "Quick Repeat hotkey must include at least one modifier key (Ctrl, Shift, or Alt)."
-                    )
-                    return
-
-                # Validate quick hotkey is different from main hotkey
-                if hotkey and quick_hotkey.lower() == hotkey.lower():
-                    QMessageBox.warning(
-                        self,
-                        "Invalid Quick Hotkey",
-                        "Quick Repeat hotkey must be different from Main Hotkey."
-                    )
-                    return
-
-                # Validate against critical system hotkeys
-                if quick_hotkey.lower() in critical_hotkeys:
-                    QMessageBox.warning(
-                        self,
-                        "Reserved Hotkey",
-                        f"'{quick_hotkey}' is a critical system hotkey and cannot be used.\n\n"
-                        "Please choose a different combination."
-                    )
-                    return
-
+            self.config_manager.set("hotkey.key", hotkey)
             self.config_manager.set("hotkey.quick_key", quick_hotkey)
-
-            # 파일에 저장
+            if self.prompt_manager and (self._prompt_drafts != prompts_before or self._reset_prompt_keys):
+                for key, draft in self._prompt_drafts.items():
+                    if key in self._reset_prompt_keys and draft == self.prompt_manager.default_prompts.get(key):
+                        self.prompt_manager.reset_prompt(key)
+                    elif draft != prompts_before.get(key):
+                        self.prompt_manager.update_prompt(
+                            key, name=draft["name"], template=draft["template"],
+                            temperature=draft["temperature"]
+                        )
+                self.prompt_manager.save()
+                prompts_saved = True
             self.config_manager.save()
+        except Exception as exc:
+            rollback_failed = False
+            self.config_manager._config = config_before
+            if self.prompt_manager:
+                self.prompt_manager.prompts = prompts_before
+                self.prompt_manager.user_prompts = user_prompts_before
+                if prompts_saved:
+                    try:
+                        self.prompt_manager.save()
+                    except Exception:
+                        rollback_failed = True
+                        logger.exception("Failed to restore prompts after settings save failure")
+            logger.exception("Failed to save settings")
+            message = f"Failed to save settings: {exc}"
+            if rollback_failed:
+                message += "\n\nThe prompt file could not be restored. Review prompt settings before restarting."
+            QMessageBox.critical(self, "Error", message)
+            return
+        self.settings_saved.emit(self.config_manager.get_all())
+        self.accept()
 
-            logger.info("Settings saved successfully")
-
-            # Signal 발생
-            self.settings_saved.emit(self.config_manager.get_all())
-
-            QMessageBox.information(
-                self,
-                "Settings Saved",
-                "Your settings have been saved successfully."
-            )
-
-            # 창 닫기
-            self.accept()
-
-        except Exception as e:
-            logger.error(f"Error saving settings: {e}")
-            QMessageBox.critical(
-                self,
-                "Error",
-                f"Failed to save settings: {e}"
-            )
 
 
 # 테스트 코드

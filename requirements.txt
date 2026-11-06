@@ -8,11 +8,5 @@ PySide6>=6.6.0
 pynput>=1.7.6
 pyperclip>=1.8.2
 
-# Encryption (includes DPAPI support)
-cryptography>=41.0.0
-
 # HTTP Client
 httpx>=0.25.0
-
-# Utilities
-darkdetect>=0.8.0

@@ -5,11 +5,14 @@
 """
 
 import json
+import math
+from copy import deepcopy
 import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 from core.chatml_parser import ChatMLParser
+from core.storage import atomic_write_json
 
 
 logger = logging.getLogger(__name__)
@@ -66,6 +69,7 @@ class PromptManager:
         try:
             with open(self.prompts_path, 'r', encoding='utf-8') as f:
                 self.default_prompts = json.load(f)
+            self.default_prompts = self._validated_prompts(self.default_prompts)
             logger.info(f"Loaded {len(self.default_prompts)} default prompts")
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in default prompts file: {e}")
@@ -76,7 +80,8 @@ class PromptManager:
         if self.user_prompts_path.exists():
             try:
                 with open(self.user_prompts_path, 'r', encoding='utf-8') as f:
-                    self.user_prompts = json.load(f)
+                    loaded_user_prompts = json.load(f)
+                self.user_prompts = self._validated_prompts(loaded_user_prompts, ignore_invalid=True)
                 logger.info(f"Loaded {len(self.user_prompts)} user prompts")
             except json.JSONDecodeError as e:
                 logger.warning(f"Invalid JSON in user prompts file, ignoring: {e}")
@@ -85,6 +90,38 @@ class PromptManager:
 
         # 3. 병합 (사용자 프롬프트가 우선)
         self._merge_prompts()
+
+    @staticmethod
+    def _validate_prompt(prompt_key: str, prompt: Dict[str, Any]) -> None:
+        if not isinstance(prompt_key, str) or not prompt_key.strip() or not isinstance(prompt, dict):
+            raise ValueError("Each prompt must have a nonempty key and an object value")
+        if not isinstance(prompt.get("name"), str) or not prompt["name"].strip():
+            raise ValueError(f"Prompt '{prompt_key}' must have a name")
+        template = prompt.get("template")
+        if not isinstance(template, str) or not template.strip():
+            raise ValueError(f"Prompt '{prompt_key}' must have a template")
+        temperature = prompt.get("temperature", 0.7)
+        if (isinstance(temperature, bool) or not isinstance(temperature, (int, float))
+                or not math.isfinite(temperature) or not 0 <= temperature <= 2):
+            raise ValueError(f"Prompt '{prompt_key}' temperature must be between 0 and 2")
+        if ChatMLParser.is_chatml(template):
+            ChatMLParser.parse(template)
+
+    @classmethod
+    def _validated_prompts(cls, prompts, ignore_invalid=False):
+        if not isinstance(prompts, dict):
+            raise ValueError("Prompts file must be a JSON object")
+        valid = {}
+        for key, prompt in prompts.items():
+            try:
+                cls._validate_prompt(key, prompt)
+            except ValueError:
+                if not ignore_invalid:
+                    raise
+                logger.warning("Ignoring invalid user prompt: %s", key)
+            else:
+                valid[key] = deepcopy(prompt)
+        return valid
 
     def _merge_prompts(self) -> None:
         """기본 프롬프트와 사용자 프롬프트 병합 (사용자 우선)"""
@@ -119,7 +156,7 @@ class PromptManager:
         Returns:
             프롬프트 정보 딕셔너리 (name, template, temperature)
         """
-        return self.prompts.get(prompt_key)
+        return deepcopy(self.prompts.get(prompt_key))
 
     def get_messages(
         self,
@@ -197,6 +234,7 @@ class PromptManager:
             "template": template,
             "temperature": temperature
         }
+        self._validate_prompt(prompt_key, new_prompt)
         self.user_prompts[prompt_key] = new_prompt
         self.prompts[prompt_key] = new_prompt.copy()
         logger.info(f"Added user prompt: {prompt_key}")
@@ -222,23 +260,17 @@ class PromptManager:
         """
         if prompt_key not in self.prompts:
             raise ValueError(f"Unknown prompt key: {prompt_key}")
-
-        # 사용자 프롬프트에 없으면 현재 값을 복사
-        if prompt_key not in self.user_prompts:
-            self.user_prompts[prompt_key] = self.prompts[prompt_key].copy()
-
-        # 값 업데이트
+        updated = self.prompts[prompt_key].copy()
         if name is not None:
-            self.user_prompts[prompt_key]["name"] = name
-            self.prompts[prompt_key]["name"] = name
+            updated["name"] = name
         if template is not None:
-            self.user_prompts[prompt_key]["template"] = template
-            self.prompts[prompt_key]["template"] = template
+            updated["template"] = template
         if temperature is not None:
-            self.user_prompts[prompt_key]["temperature"] = temperature
-            self.prompts[prompt_key]["temperature"] = temperature
-
-        logger.info(f"Updated user prompt: {prompt_key}")
+            updated["temperature"] = temperature
+        self._validate_prompt(prompt_key, updated)
+        self.user_prompts[prompt_key] = updated.copy()
+        self.prompts[prompt_key] = updated
+        logger.info("Updated user prompt: %s", prompt_key)
 
     def save(self) -> None:
         """
@@ -248,20 +280,10 @@ class PromptManager:
             OSError: 파일 쓰기 실패 시
         """
         # 사용자 프롬프트가 없으면 저장하지 않음
-        if not self.user_prompts:
-            logger.debug("No user prompts to save")
-            return
-
-        # 디렉토리가 없으면 생성
-        self.user_prompts_path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            with open(self.user_prompts_path, 'w', encoding='utf-8') as f:
-                json.dump(self.user_prompts, f, indent=2, ensure_ascii=False)
-            logger.info(f"User prompts saved to {self.user_prompts_path}")
-        except Exception as e:
-            logger.error(f"Error saving user prompts: {e}")
-            raise
+        validated = self._validated_prompts(self.user_prompts)
+        # Persist the empty object too: resetting the last override must survive restart.
+        atomic_write_json(self.user_prompts_path, validated)
+        logger.info("User prompts saved to %s", self.user_prompts_path)
 
     def reset_prompt(self, prompt_key: str) -> None:
         """

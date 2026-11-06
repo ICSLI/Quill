@@ -18,7 +18,7 @@ class ChatMLParser:
 
     # ChatML 역할 패턴: <|im_start|>role\ncontent (다음 <|im_start|> 또는 <|im_end|> 또는 문자열 끝까지)
     ROLE_PATTERN = re.compile(
-        r'<\|im_start\|>(\w+)\n(.*?)(?=<\|im_start\|>|<\|im_end\|>|$)',
+        r'<\|im_start\|>(\w+)\r?\n(.*?)(?=<\|im_start\|>|<\|im_end\|>|$)',
         re.DOTALL  # . matches newlines
     )
 
@@ -77,6 +77,9 @@ class ChatMLParser:
             logger.warning("No valid ChatML blocks found in template")
             raise ValueError("No valid ChatML blocks found in template")
 
+        if len(matches) != template.count("<|im_start|>"):
+            raise ValueError("Malformed ChatML message header; expected a role followed by a newline")
+
         messages = []
         for role, content in matches:
             messages.append({
@@ -105,20 +108,10 @@ class ChatMLParser:
             >>> ChatMLParser.substitute_variables(template, variables)
             'User said: Hello. Instruction: Translate to French'
         """
-        result = template
-        substitution_count = 0
-
-        for key, value in variables.items():
-            pattern = f'{{{{{key}}}}}'
-            if pattern in result:
-                result = result.replace(pattern, value)
-                substitution_count += 1
-                logger.debug(f"Substituted variable: {key}")
-
-        if substitution_count > 0:
-            logger.debug(f"Total {substitution_count} variables substituted")
-
-        return result
+        # One pass keeps placeholders occurring inside user input literal.
+        return ChatMLParser.VARIABLE_PATTERN.sub(
+            lambda match: variables.get(match.group(1), match.group(0)), template
+        )
 
     @staticmethod
     def parse_and_substitute(
@@ -148,15 +141,15 @@ class ChatMLParser:
              {'role': 'user', 'content': 'Translate: Hello world'}]
         """
         # 1. 변수 치환
-        substituted = ChatMLParser.substitute_variables(template, variables)
-
-        # 2. ChatML 파싱
-        if ChatMLParser.is_chatml(substituted):
-            return ChatMLParser.parse(substituted)
-        else:
-            # ChatML 형식이 아니면 user 메시지로 처리
-            logger.debug("Not ChatML format, treating as user message")
-            return [{"role": "user", "content": substituted}]
+        # Parse trusted template structure before inserting untrusted text.
+        if ChatMLParser.is_chatml(template):
+            return [
+                {"role": message["role"], "content": ChatMLParser.substitute_variables(
+                    message["content"], variables
+                )}
+                for message in ChatMLParser.parse(template)
+            ]
+        return [{"role": "user", "content": ChatMLParser.substitute_variables(template, variables)}]
 
     @staticmethod
     def get_variables_in_template(template: str) -> List[str]:
@@ -175,7 +168,7 @@ class ChatMLParser:
             ['text', 'instruction']
         """
         matches = ChatMLParser.VARIABLE_PATTERN.findall(template)
-        return list(set(matches))  # 중복 제거
+        return list(dict.fromkeys(matches))  # 중복 제거
 
 
 # 테스트 코드
