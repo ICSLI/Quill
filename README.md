@@ -251,3 +251,6 @@ If a shortcut is unavailable at startup, Quill remains paused in the system tray
 Open Settings, choose another shortcut, then select Resume. While active, changed
 shortcuts are registered before settings are saved; if saving fails, Quill attempts
 to restore the previous shortcuts. While paused, saved shortcuts take effect on Resume.
+
+To launch a single session paused, run `Quill.exe --paused`. This does not change saved
+shortcut settings or the behavior of a later normal launch.

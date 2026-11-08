@@ -9,7 +9,7 @@ DARK_THEME = """
 QWidget {
     background-color: #1e1e1e;
     color: #d4d4d4;
-    font-family: 'Segoe UI', 'Arial', sans-serif;
+    font-family: 'Segoe UI';
     font-size: 13px;
 }
 

@@ -10,6 +10,65 @@ from app.application import QuillApp
 
 
 class ApplicationLifecycleTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows paused launch')
+    def test_paused_launch_preserves_config_and_registers_only_on_resume(self):
+        script = textwrap.dedent('''
+            import ctypes
+            import tempfile
+            from pathlib import Path
+            from unittest.mock import Mock, patch
+            from PySide6.QtCore import QTimer
+            from app.application import QuillApp
+            from app.windows_hotkeys import _user32
+            from core.config_manager import ConfigManager
+            from core.prompt_manager import PromptManager
+            api = _user32()
+            with tempfile.TemporaryDirectory() as folder:
+                config = ConfigManager(str(Path(folder) / 'config.json'))
+                config.create_default_config()
+                config.set('hotkey.key', '<ctrl>+<alt>+<shift>+<135>')
+                config.set('hotkey.quick_key', '')
+                config.save()
+                original = config.config_path.read_bytes()
+                prompts = PromptManager(user_prompts_path=str(Path(folder) / 'prompts.json'))
+                provider, tray = Mock(), Mock()
+                with patch('app.application.ConfigManager', return_value=config), \
+                     patch('app.application.PromptManager', return_value=prompts), \
+                     patch('app.application.OAICompatibleProvider', return_value=provider), \
+                     patch('app.application.TrayManager', return_value=tray):
+                    app = QuillApp(['Quill', '--paused'])
+                    assert not app.hotkey_manager.is_active
+                    assert not app.hotkey_manager.is_running()
+                    tray.set_paused.assert_called_once_with(True)
+                    tray.show_message.assert_not_called()
+                    assert api.RegisterHotKey(None, 0x4100, 0x4007, 135)
+                    api.UnregisterHotKey(None, 0x4100)
+                    errors = []
+                    def exercise():
+                        try:
+                            app._on_pause_toggled(False)
+                            assert app.hotkey_manager.is_running()
+                            duplicate = api.RegisterHotKey(None, 0x4100, 0x4007, 135)
+                            if duplicate: api.UnregisterHotKey(None, 0x4100)
+                            assert not duplicate
+                            assert config.config_path.read_bytes() == original
+                            provider.complete.assert_not_called()
+                        except Exception as exc:
+                            errors.append(repr(exc))
+                        finally:
+                            app.quit()
+                    QTimer.singleShot(0, exercise)
+                    QTimer.singleShot(3000, lambda: app.exit(3))
+                    assert app.exec() == 0
+                    assert not errors, errors
+                    assert api.RegisterHotKey(None, 0x4100, 0x4007, 135)
+                    api.UnregisterHotKey(None, 0x4100)
+        ''')
+        result = subprocess.run([sys.executable, '-c', script],
+                                env=dict(os.environ, QT_QPA_PLATFORM='offscreen'),
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipUnless(sys.platform == 'win32', 'Windows hotkey recovery')
     def test_real_windows_conflict_can_be_fixed_in_settings_and_resumed(self):
         script = textwrap.dedent('''
@@ -128,7 +187,7 @@ class ApplicationLifecycleTests(unittest.TestCase):
 
     def make_app(self):
         return SimpleNamespace(
-            _shutting_down=False, _ai_request_in_progress=True, activeModalWidget=lambda: None,
+            _shutting_down=False, _start_paused=False, _ai_request_in_progress=True, activeModalWidget=lambda: None,
             _extraction_in_progress=False, _quick_mode=False,
             text_processor=Mock(), ai_provider=Mock(), hotkey_manager=Mock(),
             tray_manager=Mock(), _show_error_dialog=Mock(),

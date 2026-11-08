@@ -44,6 +44,7 @@ class QuillApp(QApplication):
     def __init__(self, argv):
         """QuillApp 초기화"""
         super().__init__(argv)
+        self._start_paused = "--paused" in argv
 
         # 마지막 창이 닫혀도 앱 종료 안 함 (트레이 앱)
         self.setQuitOnLastWindowClosed(False)
@@ -195,6 +196,9 @@ class QuillApp(QApplication):
             # Keep recovery controls available even if Windows rejects a shortcut.
             self.tray_manager.create_tray_icon()
             self._create_popup_window()
+            if self._start_paused:
+                self.hotkey_manager.pause()
+                self.tray_manager.set_paused(True)
             hotkey = self.config_manager.get("hotkey.key", "<ctrl>+<space>")
             quick_hotkey = self.config_manager.get("hotkey.quick_key", "")
             try:
