@@ -83,7 +83,7 @@ class SettingsWindow(QDialog):
     # Signal: 설정 저장 완료
     settings_saved = Signal(dict)
 
-    def __init__(self, config_manager, crypto_manager, prompt_manager=None, parent=None):
+    def __init__(self, config_manager, crypto_manager, prompt_manager=None, parent=None, *, hotkey_manager=None):
         """
         SettingsWindow 초기화
 
@@ -98,6 +98,7 @@ class SettingsWindow(QDialog):
         self.config_manager = config_manager
         self.crypto_manager = crypto_manager
         self.prompt_manager = prompt_manager
+        self.hotkey_manager = hotkey_manager
         self._prompt_drafts = deepcopy(prompt_manager.prompts) if prompt_manager else {}
         self._current_prompt_key = None
         self._reset_prompt_keys = set()
@@ -236,7 +237,9 @@ class SettingsWindow(QDialog):
             "Main Hotkey: Opens the prompt selection popup\n"
             "Quick Repeat: Repeats last action without popup (leave empty to disable)\n\n"
             "Format: <ctrl>+<space>, <ctrl>+<alt>+<space>, <alt>+q\n"
-            "Note: Regular keys (a-z, 0-9) don't need angle brackets"
+            "Note: Regular keys (a-z, 0-9) don't need angle brackets\n\n"
+            "Choose combinations not used by other apps.\n"
+            "While Quill is paused, saved shortcuts take effect when you select Resume."
         )
         help_label.setObjectName("subtitleLabel")
         help_label.setWordWrap(True)
@@ -510,7 +513,13 @@ class SettingsWindow(QDialog):
         prompts_before = deepcopy(self.prompt_manager.prompts) if self.prompt_manager else None
         user_prompts_before = deepcopy(self.prompt_manager.user_prompts) if self.prompt_manager else None
         prompts_saved = False
+        hotkeys_applied = False
+        hotkeys_before = (self.hotkey_manager.hotkey, self.hotkey_manager.quick_hotkey) if self.hotkey_manager else None
         try:
+            # Register first: a conflict must not leave unusable shortcuts on disk.
+            if self.hotkey_manager and (hotkey, quick_hotkey) != hotkeys_before:
+                self.hotkey_manager.set_hotkeys(hotkey, quick_hotkey)
+                hotkeys_applied = True
             self.config_manager.set("api.base_url", base_url)
             self.config_manager.set("api.model", model)
             self.config_manager.set("api.additional_params", additional_params)
@@ -534,7 +543,7 @@ class SettingsWindow(QDialog):
                 prompts_saved = True
             self.config_manager.save()
         except Exception as exc:
-            rollback_failed = False
+            rollback_errors = []
             self.config_manager._config = config_before
             if self.prompt_manager:
                 self.prompt_manager.prompts = prompts_before
@@ -543,12 +552,18 @@ class SettingsWindow(QDialog):
                     try:
                         self.prompt_manager.save()
                     except Exception:
-                        rollback_failed = True
+                        rollback_errors.append("the prompt file")
                         logger.exception("Failed to restore prompts after settings save failure")
+            if hotkeys_applied:
+                try:
+                    self.hotkey_manager.set_hotkeys(*hotkeys_before)
+                except Exception:
+                    rollback_errors.append("the active shortcuts")
+                    logger.exception("Failed to restore shortcuts after settings save failure")
             logger.exception("Failed to save settings")
             message = f"Failed to save settings: {exc}"
-            if rollback_failed:
-                message += "\n\nThe prompt file could not be restored. Review prompt settings before restarting."
+            if rollback_errors:
+                message += "\n\nCould not restore " + " and ".join(rollback_errors) + ". Review settings before restarting."
             QMessageBox.critical(self, "Error", message)
             return
         self.settings_saved.emit(self.config_manager.get_all())

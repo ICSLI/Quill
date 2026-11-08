@@ -192,18 +192,21 @@ class QuillApp(QApplication):
             self.ai_provider.configure(base_url, api_key, model)
             logger.info("AI provider configured")
 
-            # 핫키 시작
+            # Keep recovery controls available even if Windows rejects a shortcut.
+            self.tray_manager.create_tray_icon()
+            self._create_popup_window()
             hotkey = self.config_manager.get("hotkey.key", "<ctrl>+<space>")
             quick_hotkey = self.config_manager.get("hotkey.quick_key", "")
-            self.hotkey_manager.start(hotkey, quick_hotkey)
-            logger.info(f"Hotkey started: main={hotkey}, quick={quick_hotkey or 'disabled'}")
-
-            # 트레이 아이콘 생성
-            self.tray_manager.create_tray_icon()
-            # 시작 알림 제거 (조용한 시작)
-
-            # 팝업 윈도우 미리 생성 (첫 호출 지연 방지)
-            self._create_popup_window()
+            try:
+                self.hotkey_manager.start(hotkey, quick_hotkey)
+            except (ValueError, RuntimeError, OSError) as exc:
+                self.hotkey_manager.pause()
+                self.tray_manager.set_paused(True)
+                logger.warning("Starting paused because shortcuts are unavailable: %s", exc)
+                self.tray_manager.show_message(
+                    "Quill shortcuts unavailable",
+                    "Quill is paused. Open Settings from the tray, choose another shortcut, then Resume."
+                )
 
             logger.info("Quill application started successfully")
 
@@ -443,7 +446,8 @@ class QuillApp(QApplication):
         self.settings_window = SettingsWindow(
             self.config_manager,
             self.crypto_manager,
-            self.prompt_manager
+            self.prompt_manager,
+            hotkey_manager=self.hotkey_manager
         )
         self.settings_window.settings_saved.connect(self._on_settings_saved)
         self.settings_window.show()
@@ -466,10 +470,7 @@ class QuillApp(QApplication):
 
             self.ai_provider.configure(base_url, api_key, model)
 
-            # 핫키 재시작
-            hotkey = self.config_manager.get("hotkey.key", "<ctrl>+<space>")
-            quick_hotkey = self.config_manager.get("hotkey.quick_key", "")
-            self.hotkey_manager.set_hotkeys(hotkey, quick_hotkey)
+            # SettingsWindow applies shortcuts before committing settings.
 
             logger.info("Configuration reloaded successfully")
 
@@ -493,7 +494,12 @@ class QuillApp(QApplication):
             self.hotkey_manager.pause()
             logger.info("Application paused")
         else:
-            self.hotkey_manager.resume()
+            try:
+                self.hotkey_manager.resume()
+            except Exception as exc:
+                self.tray_manager.set_paused(True)
+                self._show_error_dialog("Shortcut Registration Failed", str(exc))
+                return
             logger.info("Application resumed")
 
     def _on_quit_requested(self):

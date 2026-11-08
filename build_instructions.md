@@ -24,6 +24,11 @@ Before distributing a release, check:
 
 - Launch from a fresh extracted directory, complete onboarding, and restart.
 - Test popup and quick-repeat hotkeys, including overlapping key combinations.
+- Launch through the Startup shortcut and verify Windows actually owns both shortcuts.
+- Reboot or sign out/in, then test Ctrl+Space immediately after login. A shortcut launch
+  within an existing session does not replace this check.
+- Test a conflicting shortcut: Quill should remain paused with Settings available.
+- Test Pause/Resume and shortcut changes while paused; verify quitting releases registrations.
 - Select text in Notepad and a browser, then run an action against a configured API.
 - Change focus or selection while waiting: the original text must remain untouched.
 - Test Korean IME, multiline text, repeated identical selections, and multi-monitor taskbars.

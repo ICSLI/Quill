@@ -1,12 +1,11 @@
-"""Global shortcuts with exact chord matching and predictable listener lifetime."""
+"""Global shortcuts registered with Windows instead of a keyboard hook."""
 
 import logging
-import threading
-from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
 from pynput import keyboard
 from pynput.mouse import Controller as MouseController
+from app.windows_hotkeys import WindowsHotkeys, shortcut_spec
 
 
 logger = logging.getLogger(__name__)
@@ -41,7 +40,9 @@ def validate_hotkeys(hotkey: str, quick_hotkey: str = ''):
     if not isinstance(quick_hotkey, str):
         raise ValueError('The quick shortcut must be text.')
     quick = _parse_hotkey(quick_hotkey) if quick_hotkey else None
-    if main == quick:
+    main_spec = shortcut_spec(main)
+    quick_spec = shortcut_spec(quick) if quick else None
+    if main_spec == quick_spec:
         raise ValueError('Main and quick shortcuts must be different.')
 
 
@@ -51,14 +52,11 @@ class HotkeyManager(QObject):
 
     def __init__(self):
         super().__init__()
-        self.listener: Optional[keyboard.Listener] = None
+        self.listener = None
         self.hotkey = '<ctrl>+<space>'
         self.quick_hotkey = ''
         self.is_active = True
         self.mouse = MouseController()
-        self._pressed = set()
-        self._active_chords = set()
-        self._bindings = {}
 
     def start(self, hotkey=None, quick_hotkey=None):
         main = self.hotkey if hotkey is None else hotkey
@@ -67,56 +65,33 @@ class HotkeyManager(QObject):
         bindings = {_parse_hotkey(main): self._on_hotkey_activated}
         if quick:
             bindings[_parse_hotkey(quick)] = self._on_quick_hotkey_activated
-        self.stop()
-        self._bindings = bindings
-        listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
-        self.listener = listener
-        try:
-            listener.start()
-            listener.wait()
-        except Exception as exc:
-            self.stop()
-            raise RuntimeError('Failed to start hotkey listener: ' + str(exc)) from exc
+        if self.is_active:
+            listener = self.listener or WindowsHotkeys()
+            listener.set_bindings(bindings)
+            self.listener = listener
         self.hotkey, self.quick_hotkey = main, quick
-        logger.info('Hotkey listener started: main=%s, quick=%s', main, quick or 'disabled')
+        logger.info('Windows hotkeys configured: main=%s, quick=%s, active=%s', main, quick or 'disabled', self.is_active)
 
     def stop(self):
-        listener, self.listener = self.listener, None
-        if listener is not None:
-            listener.stop()
-            if listener is not threading.current_thread() and listener.ident is not None:
-                listener.join(timeout=1)
-        self._pressed.clear()
-        self._active_chords.clear()
+        if self.listener is not None:
+            self.listener.stop()
+            self.listener = None
 
     def set_hotkeys(self, hotkey=None, quick_hotkey=None):
-        # Rebuild bindings while paused, too; resume must use the newly saved shortcuts.
         self.start(hotkey, quick_hotkey)
 
     def pause(self):
+        # Release OS registrations so paused Quill does not swallow shortcuts.
+        self.stop()
         self.is_active = False
-        self._active_chords.clear()
 
     def resume(self):
         self.is_active = True
-
-    def _on_press(self, key):
-        listener = self.listener
-        if listener is None:
-            return
-        self._pressed.add(listener.canonical(key))
-        chord = frozenset(self._pressed)
-        # Exact matching prevents Ctrl+Shift+Space from also firing Ctrl+Space.
-        if self.is_active and chord in self._bindings and chord not in self._active_chords:
-            self._active_chords.add(chord)
-            self._bindings[chord]()
-
-    def _on_release(self, key):
-        listener = self.listener
-        if listener is not None:
-            self._pressed.discard(listener.canonical(key))
-        # A subset chord is never triggered just by releasing an extra modifier.
-        self._active_chords = {chord for chord in self._active_chords if chord.issubset(self._pressed)}
+        try:
+            self.start()
+        except Exception:
+            self.is_active = False
+            raise
 
     def _on_hotkey_activated(self):
         if self.is_active:

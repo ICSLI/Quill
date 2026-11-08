@@ -241,3 +241,13 @@ an input or AI operation is running.
 Clipboard handling currently restores plain text only; rich text, images, and other
 clipboard formats are not preserved. Applications that block synthetic copy/paste,
 including elevated applications, still require manual compatibility testing.
+
+On Windows, Quill registers shortcuts with `RegisterHotKey` and receives them through
+Qt's message loop. It does not use a global keyboard hook or track ordinary typing.
+Windows suppresses hotkey auto-repeat, and a registration conflict is reported instead
+of silently leaving shortcuts inactive. Pausing releases the shortcuts until resumed.
+
+If a shortcut is unavailable at startup, Quill remains paused in the system tray.
+Open Settings, choose another shortcut, then select Resume. While active, changed
+shortcuts are registered before settings are saved; if saving fails, Quill attempts
+to restore the previous shortcuts. While paused, saved shortcuts take effect on Resume.

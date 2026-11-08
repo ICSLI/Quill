@@ -10,6 +10,72 @@ from app.application import QuillApp
 
 
 class ApplicationLifecycleTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows hotkey recovery')
+    def test_real_windows_conflict_can_be_fixed_in_settings_and_resumed(self):
+        script = textwrap.dedent('''
+            import ctypes
+            import tempfile
+            from pathlib import Path
+            from unittest.mock import Mock, patch
+            from PySide6.QtCore import QTimer
+            from app.application import QuillApp
+            from app.windows_hotkeys import _user32
+            from core.config_manager import ConfigManager
+            from core.prompt_manager import PromptManager
+
+            api = _user32()
+            assert api.RegisterHotKey(None, 0x4100, 0x4007, 135)
+            try:
+                with tempfile.TemporaryDirectory() as folder:
+                    config = ConfigManager(str(Path(folder) / 'config.json'))
+                    config.create_default_config()
+                    config.set('hotkey.key', '<ctrl>+<alt>+<shift>+<135>')
+                    config.set('hotkey.quick_key', '')
+                    config.save()
+                    prompts = PromptManager(user_prompts_path=str(Path(folder) / 'prompts.json'))
+                    provider, tray = Mock(), Mock()
+                    with patch('app.application.ConfigManager', return_value=config), \
+                         patch('app.application.PromptManager', return_value=prompts), \
+                         patch('app.application.OAICompatibleProvider', return_value=provider), \
+                         patch('app.application.TrayManager', return_value=tray):
+                        app = QuillApp([])
+                        assert not app.hotkey_manager.is_active
+                        tray.set_paused.assert_called_once_with(True)
+                        errors = []
+                        def exercise():
+                            try:
+                                app._show_settings()
+                                app.settings_window.input_hotkey.setText('<ctrl>+<alt>+<shift>+<f11>')
+                                app.settings_window._on_save()
+                                assert app.settings_window.result() == 1
+                                assert config.get('hotkey.key') == '<ctrl>+<alt>+<shift>+<f11>'
+                                assert not app.hotkey_manager.is_active
+                                app._on_pause_toggled(False)
+                                assert app.hotkey_manager.is_running()
+                                duplicate = api.RegisterHotKey(None, 0x4101, 0x4007, 122)
+                                if duplicate:
+                                    api.UnregisterHotKey(None, 0x4101)
+                                assert not duplicate, 'Quill did not register the replacement shortcut.'
+                                provider.complete.assert_not_called()
+                            except Exception as exc:
+                                errors.append(repr(exc))
+                            finally:
+                                app.quit()
+                        QTimer.singleShot(0, exercise)
+                        QTimer.singleShot(3000, lambda: app.exit(3))
+                        assert app.exec() == 0
+                        assert not errors, errors
+                        # Cleanup must release the replacement shortcut too.
+                        assert api.RegisterHotKey(None, 0x4101, 0x4007, 122)
+                        api.UnregisterHotKey(None, 0x4101)
+            finally:
+                api.UnregisterHotKey(None, 0x4100)
+        ''')
+        result = subprocess.run([sys.executable, '-c', script],
+                                env=dict(os.environ, QT_QPA_PLATFORM='offscreen'),
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_real_qt_event_loop_delivers_worker_result_and_cleans_up(self):
         script = textwrap.dedent('''
             import tempfile
@@ -133,6 +199,31 @@ class ApplicationLifecycleTests(unittest.TestCase):
         self.assertFalse(app._ai_request_in_progress)
         self.assertFalse(app._extraction_in_progress)
         self.assertFalse(app._quick_mode)
+
+    def test_failed_resume_keeps_tray_paused_and_reports_registration_error(self):
+        app = self.make_app()
+        app.hotkey_manager.resume.side_effect = RuntimeError('Shortcut busy')
+        QuillApp._on_pause_toggled(app, False)
+        app.tray_manager.set_paused.assert_called_once_with(True)
+        app._show_error_dialog.assert_called_once_with('Shortcut Registration Failed', 'Shortcut busy')
+
+    def test_startup_conflict_keeps_tray_and_settings_recovery_available(self):
+        app = self.make_app()
+        app.config_manager = Mock()
+        settings = {'api.base_url': 'http://localhost/v1', 'api.model': 'model',
+                    'hotkey.key': '<ctrl>+<space>', 'hotkey.quick_key': ''}
+        app.config_manager.get.side_effect = lambda key, default=None: settings.get(key, default)
+        app.config_manager.get_api_key.return_value = ''
+        app._create_popup_window = Mock()
+        app.hotkey_manager.start.side_effect = RuntimeError('Shortcut busy')
+        with self.assertLogs('app.application', level='WARNING'), patch('app.application.QTimer.singleShot') as quit_timer:
+            QuillApp._start_app(app)
+        app.tray_manager.create_tray_icon.assert_called_once()
+        app._create_popup_window.assert_called_once()
+        app.hotkey_manager.pause.assert_called_once()
+        app.tray_manager.set_paused.assert_called_once_with(True)
+        app.tray_manager.show_message.assert_called_once()
+        quit_timer.assert_not_called()
 
 
 if __name__ == '__main__':

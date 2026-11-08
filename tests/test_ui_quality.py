@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -158,6 +158,83 @@ class UiQualityTests(unittest.TestCase):
             self.addCleanup(tray.hide)
             self.assertEqual(tray.action_pause.text(), "Resume")
             self.assertIs(tray.tray_icon.parent(), tray)
+
+    def runtime_hotkeys(self):
+        manager = Mock(hotkey=self.config.get('hotkey.key'),
+                       quick_hotkey=self.config.get('hotkey.quick_key'))
+        def apply(main, quick):
+            manager.hotkey, manager.quick_hotkey = main, quick
+        manager.set_hotkeys.side_effect = apply
+        self.window.hotkey_manager = manager
+        return manager
+
+    def test_shortcut_conflict_does_not_save_any_changes(self):
+        manager = self.runtime_hotkeys()
+        manager.set_hotkeys.side_effect = RuntimeError('Shortcut already registered')
+        before = self.config.get_all()
+        disk_before = self.config.config_path.read_bytes()
+        prompts_before = deepcopy(self.prompts.prompts)
+        self.window.input_hotkey.setText('<alt>+q')
+        self.window.prompt_name_edit.setText('Uncommitted name')
+        with self.assertLogs('ui.settings_window', level='ERROR'):
+            self.window._on_save()
+        self.assertEqual(self.window.result(), 0)
+        self.assertEqual(self.config.get_all(), before)
+        self.assertEqual(self.config.config_path.read_bytes(), disk_before)
+        self.assertEqual(self.prompts.prompts, prompts_before)
+        self.assertFalse(self.prompts.user_prompts_path.exists())
+
+    def test_failed_save_restores_previous_active_shortcuts(self):
+        manager = self.runtime_hotkeys()
+        previous = manager.hotkey, manager.quick_hotkey
+        self.window.input_hotkey.setText('<alt>+q')
+        self.window.input_quick_hotkey.setText('<alt>+w')
+        with self.assertLogs('ui.settings_window', level='ERROR'), patch.object(
+            self.config, 'save', side_effect=OSError('Disk full')
+        ):
+            self.window._on_save()
+        self.assertEqual(manager.set_hotkeys.call_args_list,
+                         [call('<alt>+q', '<alt>+w'), call(*previous)])
+        self.assertEqual((manager.hotkey, manager.quick_hotkey), previous)
+        self.assertEqual(self.config.get('hotkey.key'), previous[0])
+
+    def test_shortcuts_are_applied_before_the_configuration_is_written(self):
+        manager = self.runtime_hotkeys()
+        self.window.input_hotkey.setText('<alt>+q')
+        save = self.config.save
+        def checked_save():
+            self.assertEqual(manager.hotkey, '<alt>+q')
+            manager.set_hotkeys.assert_called_once()
+            save()
+        with patch.object(self.config, 'save', side_effect=checked_save):
+            self.window._on_save()
+        self.assertEqual(self.window.result(), 1)
+        self.assertEqual(self.config.get('hotkey.key'), '<alt>+q')
+
+    def test_changing_only_api_settings_does_not_reregister_shortcuts(self):
+        manager = self.runtime_hotkeys()
+        self.window.input_model.setText('another-model')
+        self.window._on_save()
+        manager.set_hotkeys.assert_not_called()
+        self.assertEqual(self.config.get('api.model'), 'another-model')
+
+    def test_windows_reserved_key_is_rejected_before_saving(self):
+        before = self.config.get_all()
+        self.window.input_hotkey.setText('<ctrl>+<f12>')
+        self.window._on_save()
+        self.assertEqual(self.window.result(), 0)
+        self.assertEqual(self.config.get_all(), before)
+
+    def test_failed_shortcut_rollback_is_reported_instead_of_closing_dialog(self):
+        manager = self.runtime_hotkeys()
+        manager.set_hotkeys.side_effect = [None, RuntimeError('Old shortcut was taken')]
+        self.window.input_hotkey.setText('<alt>+q')
+        with self.assertLogs('ui.settings_window', level='ERROR'), patch.object(
+            self.config, 'save', side_effect=OSError('Disk full')
+        ), patch.object(QMessageBox, 'critical') as error:
+            self.window._on_save()
+        self.assertEqual(self.window.result(), 0)
+        self.assertIn('active shortcuts', error.call_args.args[2])
 
 
 if __name__ == "__main__":

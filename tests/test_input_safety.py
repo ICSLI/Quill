@@ -8,7 +8,6 @@ from unittest.mock import Mock, patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtWidgets import QApplication
 from pynput import keyboard
-from pynput.keyboard import _base
 
 from app import hotkey_manager as hotkeys
 from app import text_processor as text
@@ -164,40 +163,61 @@ class ShortcutTests(unittest.TestCase):
     def setUp(self):
         with patch.object(hotkeys, 'MouseController'):
             self.manager = hotkeys.HotkeyManager()
-        self.manager.listener = Mock()
-        self.manager.listener.canonical.side_effect = lambda value: _base.Listener.canonical(None, value)
-        self.main, self.quick = Mock(), Mock()
-        self.manager._bindings = {
-            frozenset(keyboard.HotKey.parse('<ctrl>+<space>')): self.main,
-            frozenset(keyboard.HotKey.parse('<ctrl>+<shift>+<space>')): self.quick,
-        }
+        self.backend = Mock()
+        self.factory = patch.object(hotkeys, 'WindowsHotkeys', return_value=self.backend)
+        self.factory.start()
+        self.addCleanup(self.factory.stop)
 
-    def press(self, *keys):
-        for key in keys:
-            self.manager._on_press(key)
+    def test_main_and_quick_have_separate_callbacks(self):
+        self.manager.start('<ctrl>+<space>', '<ctrl>+<shift>+<space>')
+        main, quick = [], []
+        self.manager.mouse.position = (10, 20)
+        self.manager.hotkey_pressed.connect(lambda x, y: main.append((x, y)))
+        self.manager.quick_hotkey_pressed.connect(lambda x, y: quick.append((x, y)))
+        bindings = self.backend.set_bindings.call_args.args[0]
+        bindings[frozenset(keyboard.HotKey.parse('<ctrl>+<shift>+<space>'))]()
+        self.assertEqual(quick, [(10, 20)])
+        self.assertFalse(main)
 
-    def test_quick_chord_does_not_trigger_main(self):
-        self.press(keyboard.Key.ctrl, keyboard.Key.shift, keyboard.Key.space)
-        self.quick.assert_called_once()
-        self.main.assert_not_called()
-        self.manager._on_release(keyboard.Key.shift)
-        self.main.assert_not_called()
-
-    def test_key_repeat_is_suppressed_until_release(self):
-        self.press(keyboard.Key.ctrl, keyboard.Key.space, keyboard.Key.space)
-        self.main.assert_called_once()
-        self.manager._on_release(keyboard.Key.space)
-        self.press(keyboard.Key.space)
-        self.assertEqual(self.main.call_count, 2)
-
-    def test_paused_listener_ignores_shortcuts(self):
+    def test_pausing_releases_shortcut_and_resume_uses_updated_settings(self):
+        self.manager.start()
         self.manager.pause()
-        self.press(keyboard.Key.ctrl, keyboard.Key.space)
-        self.main.assert_not_called()
+        self.backend.stop.assert_called_once()
+        self.assertFalse(self.manager.is_active)
+        self.backend.set_bindings.reset_mock()
+        self.manager.set_hotkeys('<alt>+q', '<alt>+w')
+        self.backend.set_bindings.assert_not_called()
+        self.manager.resume()
+        bindings = self.backend.set_bindings.call_args.args[0]
+        self.assertIn(frozenset(keyboard.HotKey.parse('<alt>+w')), bindings)
+        self.assertTrue(self.manager.is_active)
+
+    def test_resume_failure_remains_paused(self):
+        self.manager.pause()
+        self.backend.set_bindings.side_effect = RuntimeError('Shortcut busy')
+        with self.assertRaises(RuntimeError):
+            self.manager.resume()
+        self.assertFalse(self.manager.is_active)
+
+    def test_startup_registration_failure_is_reported(self):
+        self.backend.set_bindings.side_effect = RuntimeError('Shortcut busy')
+        with self.assertRaisesRegex(RuntimeError, 'Shortcut busy'):
+            self.manager.start()
+        self.assertFalse(self.manager.is_running())
 
     def test_reordered_duplicate_chords_are_rejected(self):
         with self.assertRaises(ValueError):
             hotkeys.validate_hotkeys('<ctrl>+<space>', '<space>+<ctrl>')
+
+    def test_equivalent_windows_key_codes_are_rejected(self):
+        with self.assertRaises(ValueError):
+            hotkeys.validate_hotkeys('<ctrl>+a', '<ctrl>+<65>')
+
+    def test_windows_invalid_virtual_key_is_rejected_even_while_paused(self):
+        self.manager.pause()
+        for shortcut in ('<ctrl>+<999>', '<ctrl>+<f12>'):
+            with self.subTest(shortcut=shortcut), self.assertRaises(ValueError):
+                self.manager.set_hotkeys(shortcut, '')
 
     def test_malformed_and_reserved_shortcuts_are_rejected(self):
         for value in ('', 'q', '<ctrl>+<ctrl>+q', '<ctrl>+<shift>', '<f4>+<alt>',
@@ -205,24 +225,14 @@ class ShortcutTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 hotkeys.validate_hotkeys(value)
 
-    def test_invalid_settings_leave_current_listener_untouched(self):
-        listener = self.manager.listener
+    def test_invalid_settings_leave_current_registration_untouched(self):
+        self.manager.start()
+        self.backend.set_bindings.reset_mock()
         with self.assertRaises(ValueError):
             self.manager.set_hotkeys('invalid shortcut')
-        self.assertIs(self.manager.listener, listener)
-        listener.stop.assert_not_called()
-
-    def test_settings_update_while_paused_rebuilds_listener(self):
-        self.manager.pause()
-        self.manager.listener.ident = None
-        with patch.object(hotkeys.keyboard, 'Listener') as factory:
-            factory.return_value.ident = None
-            self.manager.set_hotkeys('<alt>+q', '<alt>+w')
-            self.assertEqual(self.manager.hotkey, '<alt>+q')
-            self.assertFalse(self.manager.is_active)
-            factory.return_value.start.assert_called_once()
-            self.assertIn(frozenset(keyboard.HotKey.parse('<alt>+w')), self.manager._bindings)
-            self.manager.stop()
+        self.assertIs(self.manager.listener, self.backend)
+        self.backend.set_bindings.assert_not_called()
+        self.backend.stop.assert_not_called()
 
 
 if __name__ == '__main__':
