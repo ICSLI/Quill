@@ -1,272 +1,210 @@
 # 🪶 Quill - AI Writing Assistant for Windows
 
-**Quill** is a lightweight, background AI writing assistant for Windows. Select any text, press a hotkey, and let AI transform your writing instantly.
+**Quill** is a background AI writing assistant for Windows. Select text, press a hotkey, and choose a writing action or enter a custom instruction. Quill sends the request to your configured OpenAI-compatible API and replaces the selection with the text response.
 
-Inspired by [WritingTools](https://github.com/theJayTea/WritingTools), Quill offers deeper customization with ChatML prompt support and works with any OpenAI-compatible API.
-
-## ✨ What is Quill?
-
-Quill runs quietly in your system tray, ready to help whenever you need it. Whether you're writing emails, coding, or drafting documents, Quill can:
-
-- **Fix grammar and spelling** - Clean up your text instantly
-- **Rewrite content** - Make your writing clearer and more engaging
-- **Summarize text** - Get the key points from long content
-- **Translate** - Convert text to different languages
-- **Custom instructions** - Tell the AI exactly what you want
-
-**How it works:**
-1. Select any text in any application
-2. Press the hotkey (default: `Ctrl+Space`)
-3. Choose a quick action or type custom instructions
-4. Your selected text is automatically replaced with the AI response
-
-## 🚀 Features
-
-- **OAI Compatible API** - Works with OpenAI, Google Gemini, Ollama, llama.cpp, KoboldCPP, and more
-- **ChatML Prompt Format** - Advanced prompt customization with `<|im_start|>` tags
-- **Windows DPAPI Encryption** - Your API key is securely encrypted and bound to your Windows account
-- **Global Hotkey** - Works in any application
-- **Quick Repeat** - Instantly repeat last action with a single hotkey
-- **System Tray** - Runs quietly in the background
-- **Dark Theme** - Easy on the eyes
+Inspired by [WritingTools](https://github.com/theJayTea/WritingTools), Quill supports editable ChatML prompts, local model servers, and Windows DPAPI encryption for saved API keys.
 
 ## 📥 Download
 
-Download the latest release from [GitHub Releases](../../releases).
+- [Latest stable release](https://github.com/ICSLI/Quill/releases/latest)
+- [Quill v1.0.12 pre-release](https://github.com/ICSLI/Quill/releases/tag/v1.0.12) — includes hidden popup/Settings preloading and local diagnostics. Login-time hotkey verification is still pending, and the reported intermittent failure after a notification sound remains under investigation.
 
-1. Download `Quill.zip` from the latest release
-2. Extract to any folder
-3. Run `Quill.exe`
+Requirements: **Windows 10/11** and access to a compatible API or running local model server.
 
-## ⚡ Quick Start
+The instructions below describe v1.0.12. Older releases may differ.
 
-### First Run Setup
+1. Download the Windows ZIP attached to the chosen release, such as `Quill-v1.0.12-windows.zip`.
+2. Extract the entire archive to a writable folder.
+3. Run `Quill.exe`. Keep `_internal` beside it; the executable is not a standalone file.
 
-On first launch, you'll see the onboarding window:
+## 🚀 Quick Start
 
-1. **Base URL** - Enter your API endpoint
-2. **API Key** - Enter your API key (stored encrypted)
-3. **Model** - Enter the model name
+On first launch, enter your **Base URL**, **API Key**, and **Model**. The API key can be empty when your local server does not require authentication. Use a model ID available on your endpoint.
 
-### API Configuration Examples
+| Provider | Example Base URL | Model |
+|----------|------------------|-------|
+| [OpenAI](https://developers.openai.com/api/reference/resources/chat) | `https://api.openai.com/v1` | A Chat Completions model available to your API account |
+| [Google Gemini](https://ai.google.dev/gemini-api/docs/openai) | `https://generativelanguage.googleapis.com/v1beta/openai/` | A model supported by the provider's OpenAI-compatible endpoint |
+| [Ollama](https://docs.ollama.com/api/openai-compatibility) | `http://localhost:11434/v1` | The model ID served by your running local instance |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp/tree/master/tools/server) | `http://localhost:8080/v1` | The model ID served by your running local instance |
 
-| Provider | Base URL | Model |
-|----------|----------|-------|
-| OpenAI | `https://api.openai.com/v1` | `gpt-5.1-2025-11-13` |
-| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | `gemini-2.0-flash` |
-| Ollama | `http://localhost:11434/v1` | `gemma3` |
-| llama.cpp | `http://localhost:8080/v1` | (your loaded model) |
+Enter the API root, not the full `/chat/completions` URL: Quill appends `chat/completions` to the configured path. A provider-specific path is supported; it does not have to end in `/v1`.
 
-## 📖 Usage
+Quill uses non-streaming **Chat Completions** and expects text in `choices[0].message.content`. It sends `temperature` with each request. Model and parameter support varies by provider; an OpenAI-compatible endpoint does not guarantee that every model or API feature is supported.
 
-### Basic Workflow
+## ✨ Usage
 
-1. **Select text** in any application
-2. **Press hotkey** (default: `Ctrl+Space`)
-3. **Choose action:**
-   - Click a quick action button (Grammar, Rewrite, Summarize, Translate)
-   - Or type custom instructions and press `Ctrl+Enter`
-4. **Done!** Selected text is replaced with AI response
+1. Select text in an application that supports `Ctrl+C` and `Ctrl+V`.
+2. Press `Ctrl+Space` to open Quill.
+3. Choose a quick action, or type a custom instruction and press **Enter** or click **Send**.
+4. Keep the source window and selection available until the response is ready.
+
+Before pasting, Quill checks that the source window is in the foreground and the selected text still matches. If those checks fail, it leaves the target untouched and offers the response for manual copying. Empty responses and responses marked as truncated or filtered by the API are rejected.
 
 ### Quick Actions
 
-| Action | Description | Temperature |
-|--------|-------------|-------------|
-| Grammar Check | Fix spelling and grammar errors | 0.3 |
-| Rewrite | Make text clearer and more engaging | 0.7 |
-| Summarize | Condense to key points | 0.5 |
-| Translate | Translate to another language (specify in instruction) | 0.3 |
+| Action | Default behavior | Default temperature |
+|--------|------------------|---------------------|
+| Grammar Check | Fix spelling and grammar | 0.3 |
+| Rewrite | Improve clarity, readability, and flow | 0.7 |
+| Summarize | Condense text to key points | 0.5 |
+| Translate | Translate into **English** | 0.3 |
 
-### ⌨️ Keyboard Shortcuts
+For another target language, submit a custom instruction such as “Translate into Korean,” or edit the Translate template in Settings. A quick action uses its saved template; text in the instruction box affects that action only if its template includes `{{instruction}}`.
 
-- `Ctrl+Space` - Open Quill popup (customizable)
-- `Ctrl+Shift+Space` - Quick Repeat: repeat last action without popup (customizable)
-- `Ctrl+Enter` - Send custom instruction
-- `Esc` - Close popup
+### Keyboard Shortcuts
 
-### System Tray Menu
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+Space` | Open the popup for selected text; customizable |
+| `Ctrl+Shift+Space` | Quick Repeat; customizable and optional |
+| `Enter` or `Ctrl+Enter` | Send while typing in the instruction box |
+| `Shift+Enter` | Insert a newline in the instruction box |
+| `Esc` | Close the popup |
 
-Right-click the tray icon for options:
-- **Settings** - Configure API, hotkey, and prompts
-- **Pause/Resume** - Temporarily disable hotkey
-- **Quit** - Exit Quill
+**Quick Repeat** submits the last action and instruction from the current session against a new selection, without opening the popup. If no action has been submitted in that session, it opens the normal popup. The last action is not restored after restarting Quill.
 
-## 📁 Project Structure
+### System Tray
 
-```
-Quill/
-├── main.py                    # Entry point
-├── build.py                   # PyInstaller build script
-├── requirements.txt           # Dependencies
-│
-├── app/                       # Application logic
-│   ├── application.py         # Main QuillApp class
-│   ├── hotkey_manager.py      # Global hotkey handling
-│   ├── text_processor.py      # Text extraction/replacement
-│   └── tray_manager.py        # System tray icon
-│
-├── core/                      # Core modules
-│   ├── ai_provider.py         # OAI Compatible API client
-│   ├── config_manager.py      # Settings management
-│   ├── crypto_manager.py      # Windows DPAPI encryption
-│   ├── prompt_manager.py      # Prompt templates
-│   ├── chatml_parser.py       # ChatML format parser
-│   └── single_instance.py     # Prevent multiple instances
-│
-├── ui/                        # User interface
-│   ├── styles.py              # Dark theme styles
-│   ├── onboarding_window.py   # First-run setup
-│   ├── settings_window.py     # Settings dialog
-│   └── popup_window.py        # Main interaction popup
-│
-├── resources/                 # Assets
-│   ├── default_prompts.json   # Default prompt templates
-│   └── icon.ico               # Application icon
-│
-└── data/                      # User data (not in repo)
-    └── config.json            # User configuration
-```
+Right-click the tray icon to open **Settings**, toggle **Pause/Resume**, or **Quit**.
 
-## ⚙️ Configuration
+Pause releases Quill's registered shortcuts. Resume attempts to register them again; a conflict leaves Quill paused. Pause applies to the current session. To start a session paused, run `Quill.exe --paused`; a later normal launch starts with shortcuts enabled if registration succeeds.
 
-### Settings Window
+### First-Open Responsiveness
 
-Access via system tray → Settings:
+Since v1.0.12, Quill prepares popup rendering and native window creation while hidden at startup. Settings are preloaded shortly afterward when no text operation or dialog is active. This does not display a window, change focus, save settings, or make an API request.
 
-- **API Tab**
-  - Base URL - API endpoint
-  - API Key - Encrypted storage
-  - Model - Model name
-  - Additional Params - Extra API parameters (JSON)
+Opening Settings uses the prepared window. Opening it again while it is visible keeps current edits. After Save or Cancel, Quill prepares a fresh dialog. If optional preloading fails, ordinary window opening remains available.
 
-- **Hotkey Tab**
-  - Main Hotkey - Opens popup for action selection
-  - Quick Repeat - Repeats last action without popup (optional)
+## ⚙️ Settings and Prompts
 
-- **Prompts Tab**
-  - Edit prompt names and temperatures
+Open **Settings** from the system tray:
+
+- **API** — Base URL, API key, model, and Additional Params. Leave the key field empty to keep the saved key; select **Remove saved API key** to remove it.
+- **Hotkeys** — Main and Quick Repeat shortcuts. Clear Quick Repeat to disable that shortcut. When Quill is active, changed shortcuts are registered before saving; a conflict keeps the previous settings. Changes saved while paused take effect on Resume.
+- **Prompts** — Edit existing prompt names, templates, and temperatures. The Custom prompt's name is fixed. Switching prompts retains drafts; **Cancel** discards them. **Reset to Default** is also a draft until **Save** is clicked.
+
+Settings cannot be changed while a text or AI operation is in progress.
 
 ### Additional Parameters
 
-You can pass extra parameters to the API:
+Enter a JSON object containing parameters accepted by your endpoint and model. For example, if supported:
 
 ```json
 {
-  "reasoning_effort": "low",
   "top_p": 0.9
 }
 ```
 
-## 🎨 Custom Prompts (ChatML)
+These parameters apply to every request. `model`, `messages`, and `stream` cannot be overridden here. Including `temperature` overrides the value from the selected prompt.
 
-Edit `resources/default_prompts.json` to customize prompts:
+### ChatML Templates
 
-```json
-{
-  "my_prompt": {
-    "name": "My Custom Prompt",
-    "template": "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n{{instruction}}\n\nText:\n{{text}}\n<|im_end|}",
-    "temperature": 0.7
-  }
-}
+Use **Settings > Prompts** to customize a template. For example:
+
+```text
+<|im_start|>system
+Follow the user's writing instruction. Return only the resulting text.
+<|im_end|>
+<|im_start|>user
+{{instruction}}
+
+Text:
+{{text}}
+<|im_end|>
 ```
 
-### Template Variables
+- `{{text}}` — selected text
+- `{{instruction}}` — custom instruction
 
-- `{{text}}` - The selected text
-- `{{instruction}}` - User's custom instruction
+Quill parses the template's message roles before inserting these values. Saved overrides are kept in `user_prompts.json`; editing the bundled defaults is not required. Adding an arbitrary prompt key to a JSON file does not add a new quick-action button to the popup.
+
+## 📂 Data, Upgrades, and Automatic Startup
+
+| Run mode | Settings and encrypted API key | Prompt overrides |
+|----------|--------------------------------|------------------|
+| Extracted Windows build | `_internal/data/config.json` | `_internal/data/user_prompts.json` |
+| Source checkout | `data/config.json` | `data/user_prompts.json` |
+
+Only the saved API key is DPAPI-encrypted; the other settings and prompt files are JSON. The encrypted key is tied to your Windows user profile. When moving to another account or computer, you may need to enter it again.
+
+### Upgrade an Existing Installation
+
+1. Quit the old Quill instance from its tray menu.
+2. Extract the new release into a separate folder.
+3. Copy `config.json` and, if present, `user_prompts.json` from the old `_internal/data` folder to the new `_internal/data` folder. Create the destination data folder if needed.
+4. Run the new `Quill.exe` and verify settings, prompts, and shortcuts.
+5. Update your normal and Startup shortcuts to the new executable before deleting the old folder.
+
+Keep the old folder until the new installation works. Running both copies can cause shortcut conflicts. Do not distribute your data files with a release ZIP.
+
+### Automatic Startup
+
+Quill does not create a Startup shortcut automatically. To enable it:
+
+1. Create a shortcut to the extracted `Quill.exe`.
+2. In File Explorer's address bar, open `shell:startup` and place the shortcut there.
+3. Set its target to the current executable and its working directory to that executable's folder.
+4. Leave arguments empty for a normal active launch. Add `--paused` only if a paused launch is intended.
+
+Keep one Quill shortcut in Startup. After an upgrade, check that it points to the new folder. Launching the shortcut in an existing session does not verify behavior immediately after reboot/sign-in.
 
 ## 🔧 Troubleshooting
 
-### Hotkey not working
+### Hotkey Does Not Open the Popup
 
-1. Another app may be using the same hotkey - change in Settings
-2. Try running Quill as administrator (required for some apps)
-3. Check if Quill is paused (tray menu)
+Check that text is selected and that the tray menu offers **Pause**, meaning Quill is active. If it offers **Resume**, Quill is paused.
 
-### API errors
+Windows shortcuts are exclusive. Another application may own the combination; choose another shortcut in Settings, then Resume. Quill uses Windows `RegisterHotKey` through Qt's message loop, without a global keyboard hook or ordinary key-state tracking.
 
-1. Verify Base URL ends with `/v1` for OpenAI-compatible APIs
-2. Check API key is correct
-3. Ensure your API has sufficient credits/quota
+Some applications block synthetic copy/paste or require matching privilege levels. Compare behavior in a normal text editor before changing how Quill is launched.
 
-### Text not replaced
+### API Request Fails
 
-1. Make sure text is actually selected
-2. Target app must support `Ctrl+V` paste
-3. Some apps (password managers) block clipboard access
+Verify the provider's Base URL, model ID, authentication, quota, and accepted parameters. The Base URL must be HTTP(S) without embedded credentials, query parameters, or fragments. Do not add `/chat/completions` yourself. Remove unsupported Additional Params and check whether the model accepts `temperature`.
 
-## 🛠️ Building from Source
+### Response Is Not Pasted
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+The target must support copy/paste. Return to the original window with the original text selected. A failed source-window or selection check blocks automatic replacement; use **Copy Response** in the error dialog to paste manually.
 
-# Run directly
-python main.py
+### Failure After a Notification Sound
 
-# Build executable
-python build.py
-```
+The reported intermittent symptom is still under investigation. Since v1.0.12, local diagnostics help distinguish shortcut receipt, selection-copy timeout, an AI request, and an open error dialog.
+
+Open `%LOCALAPPDATA%\Quill\logs\events.log`. Records contain fixed event names, counts, flags, and redacted code locations. Selected text, prompts, API responses, and credentials are excluded. Logs rotate at 256 KiB and keep two backups; Quill does not upload them.
+
+Useful events include `hotkey.received`, `selection.copy_timed_out`, `ai.started`, `ai.completed`, `replacement.completed`, `dialog.opened`, and `dialog.closed`. Check for an open Quill dialog before restarting. When reporting a failure, include the Quill version, affected application, failed step, and relevant event sequence.
+
+### Known Limitations
+
+- Clipboard restoration preserves **plain text only**. Previously copied formatting, images, and other formats may be lost from the clipboard; source files are not deleted.
+- Settings and prompts are saved to separate files. Abrupt termination between writes can leave only part of a settings change saved.
+- Application compatibility, Korean IME, multi-monitor behavior, and login-time shortcuts require manual checks in the target environment. Passing automated tests does not establish compatibility with every application.
+
+## 🛠️ Development
+
+See [Building Quill for Windows](build_instructions.md) for environment setup, running from source, tests, packaging, and release checks.
+
+| Path | Purpose |
+|------|---------|
+| `main.py` | Entry point, instance lock, and diagnostics setup |
+| `app/` | App lifecycle, Windows hotkey registration, clipboard workers, and tray |
+| `core/` | API client, ChatML parser, settings, prompts, DPAPI, storage, and diagnostics |
+| `ui/` | Onboarding, popup, Settings, hidden-window preparation, and styles |
+| `resources/` | Default prompts and icons |
+| `tests/` | Core, input, UI, native Windows, and lifecycle regression coverage |
+| `build.py` | PyInstaller packaging with the current Python interpreter |
 
 ## 🙏 Credits
 
-- [WritingTools](https://github.com/theJayTea/WritingTools) - Inspiration
-- [PySide6](https://doc.qt.io/qtforpython-6/) - GUI framework
-- [pynput](https://github.com/moses-palmer/pynput) - Global hotkey
-- [pyperclip](https://github.com/asweigart/pyperclip) - Clipboard access
+- [WritingTools](https://github.com/theJayTea/WritingTools) — inspiration
+- [PySide6](https://doc.qt.io/qtforpython-6/) — GUI and native message-loop integration
+- [pynput](https://github.com/moses-palmer/pynput) — shortcut parsing, cursor position, and synthetic copy/paste input
+- [pyperclip](https://github.com/asweigart/pyperclip) — clipboard text access
+- [httpx](https://www.python-httpx.org/) — HTTP client
 
 ## 📄 License
 
-This project is licensed under the **GNU General Public License v3.0** (GPL-3.0).
+GNU General Public License, version 3 or later. See [LICENSE](LICENSE).
 
-Copyright (c) 2026 ICSLI
-
-See [LICENSE](LICENSE) for details.
-
----
-
-**Quill** 🪶 - AI-powered writing assistant for Windows
-
-## Development checks
-
-Run the regression suite with `python -m unittest discover -s tests -v`.
-See [build_instructions.md](build_instructions.md) for packaging and release checks.
-
-Quill verifies the source window and selected text before pasting an AI result.
-If focus or selection changes while a request is running, it leaves the target untouched.
-Empty, truncated, and filtered responses are rejected. Settings changes are blocked while
-an input or AI operation is running.
-
-Clipboard handling currently restores plain text only; rich text, images, and other
-clipboard formats are not preserved. Applications that block synthetic copy/paste,
-including elevated applications, still require manual compatibility testing.
-
-On Windows, Quill registers shortcuts with `RegisterHotKey` and receives them through
-Qt's message loop. It does not use a global keyboard hook or track ordinary typing.
-Windows suppresses hotkey auto-repeat, and a registration conflict is reported instead
-of silently leaving shortcuts inactive. Pausing releases the shortcuts until resumed.
-
-If a shortcut is unavailable at startup, Quill remains paused in the system tray.
-Open Settings, choose another shortcut, then select Resume. While active, changed
-shortcuts are registered before settings are saved; if saving fails, Quill attempts
-to restore the previous shortcuts. While paused, saved shortcuts take effect on Resume.
-
-To launch a single session paused, run `Quill.exe --paused`. This does not change saved
-shortcut settings or the behavior of a later normal launch.
-
-Popup rendering and native window creation are prepared while hidden at startup.
-Settings are preloaded shortly afterward, when no text operation or dialog is active.
-Opening Settings uses the prepared window. Closing it discards the dialog and prepares
-a fresh one, so cancelled edits do not appear when it is reopened. Preloading does
-not show a window, change focus, save settings, or send an API request.
-
-### Local diagnostics
-
-Quill records shortcut delivery, operation stages, and error-dialog opening/closing
-in `%LOCALAPPDATA%\Quill\logs\events.log`. The log contains event names, counts,
-flags, and code locations; selected text, prompts, API responses, and credentials
-are excluded. Up to three 256 KiB files are retained locally. Logs are not uploaded.
-If Quill stops responding to a shortcut after a notification sound, these stages
-help distinguish an ignored shortcut, a copy timeout, a pending request, and an
-open error dialog. This history requires a build containing the diagnostic changes.
+Copyright (c) 2026 ICSLI.
