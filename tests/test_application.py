@@ -104,9 +104,10 @@ class ApplicationLifecycleTests(unittest.TestCase):
                         def exercise():
                             try:
                                 app._show_settings()
-                                app.settings_window.input_hotkey.setText('<ctrl>+<alt>+<shift>+<f11>')
-                                app.settings_window._on_save()
-                                assert app.settings_window.result() == 1
+                                settings = app.settings_window
+                                settings.input_hotkey.setText('<ctrl>+<alt>+<shift>+<f11>')
+                                settings._on_save()
+                                assert settings.result() == 1
                                 assert config.get('hotkey.key') == '<ctrl>+<alt>+<shift>+<f11>'
                                 assert not app.hotkey_manager.is_active
                                 app._on_pause_toggled(False)
@@ -193,6 +194,8 @@ class ApplicationLifecycleTests(unittest.TestCase):
             tray_manager=Mock(), _show_error_dialog=Mock(),
             _request_thread=None, popup_window=None, settings_window=None,
             onboarding_window=None, _ai_completed=Mock(),
+            _ui_preload_timer=Mock(),
+            quit=Mock(),
         )
 
     def test_success_remains_busy_until_paste_finishes(self):
@@ -231,6 +234,18 @@ class ApplicationLifecycleTests(unittest.TestCase):
         QuillApp._show_settings(app)
         app.tray_manager.show_message.assert_called_once()
 
+    def test_preload_waits_for_text_work_and_stops_on_shutdown(self):
+        app = self.make_app()
+        app._create_settings_window = Mock()
+        QuillApp._preload_windows(app)
+        app._create_settings_window.assert_not_called()
+        app._ui_preload_timer.start.assert_called_once_with(250)
+        app._ui_preload_timer.start.reset_mock()
+        app._shutting_down = True
+        QuillApp._preload_windows(app)
+        app._create_settings_window.assert_not_called()
+        app._ui_preload_timer.start.assert_not_called()
+
     def test_cleanup_defers_client_close_to_active_worker(self):
         app = self.make_app()
         app._request_thread = Mock()
@@ -259,6 +274,18 @@ class ApplicationLifecycleTests(unittest.TestCase):
         self.assertFalse(app._extraction_in_progress)
         self.assertFalse(app._quick_mode)
 
+    def test_worker_start_failure_releases_extraction_guard(self):
+        app = self.make_app()
+        app._ai_request_in_progress = False
+        app._quick_mode = True
+        app.text_processor.extract_selected_text.side_effect = RuntimeError('worker unavailable')
+        app._on_text_operation_failed = lambda message: QuillApp._on_text_operation_failed(app, message)
+        QuillApp._begin_extraction(app)
+        self.assertFalse(app._extraction_in_progress)
+        self.assertFalse(app._quick_mode)
+        self.assertFalse(app._ai_request_in_progress)
+        app._show_error_dialog.assert_called_once()
+
     def test_failed_resume_keeps_tray_paused_and_reports_registration_error(self):
         app = self.make_app()
         app.hotkey_manager.resume.side_effect = RuntimeError('Shortcut busy')
@@ -283,6 +310,18 @@ class ApplicationLifecycleTests(unittest.TestCase):
         app.tray_manager.set_paused.assert_called_once_with(True)
         app.tray_manager.show_message.assert_called_once()
         quit_timer.assert_not_called()
+
+    def test_caught_startup_error_records_only_redacted_traceback(self):
+        app = self.make_app()
+        app.config_manager = Mock()
+        app.config_manager.load.side_effect = RuntimeError('private settings')
+        with patch('app.application.record_exception') as recorded, \
+             patch('app.application.QMessageBox.critical'), \
+             patch('app.application.QTimer.singleShot'), \
+             self.assertLogs('app.application', level='ERROR'):
+            QuillApp._start_app(app)
+        self.assertEqual(recorded.call_args.args[0], 'startup.failed')
+        self.assertEqual(len(recorded.call_args.args), 2)
 
 
 if __name__ == '__main__':

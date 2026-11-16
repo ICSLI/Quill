@@ -254,3 +254,19 @@ to restore the previous shortcuts. While paused, saved shortcuts take effect on 
 
 To launch a single session paused, run `Quill.exe --paused`. This does not change saved
 shortcut settings or the behavior of a later normal launch.
+
+Popup rendering and native window creation are prepared while hidden at startup.
+Settings are preloaded shortly afterward, when no text operation or dialog is active.
+Opening Settings uses the prepared window. Closing it discards the dialog and prepares
+a fresh one, so cancelled edits do not appear when it is reopened. Preloading does
+not show a window, change focus, save settings, or send an API request.
+
+### Local diagnostics
+
+Quill records shortcut delivery, operation stages, and error-dialog opening/closing
+in `%LOCALAPPDATA%\Quill\logs\events.log`. The log contains event names, counts,
+flags, and code locations; selected text, prompts, API responses, and credentials
+are excluded. Up to three 256 KiB files are retained locally. Logs are not uploaded.
+If Quill stops responding to a shortcut after a notification sound, these stages
+help distinguish an ignored shortcut, a copy timeout, a pending request, and an
+open error dialog. This history requires a build containing the diagnostic changes.

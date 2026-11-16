@@ -29,6 +29,10 @@ Before distributing a release, check:
   within an existing session does not replace this check.
 - Test a conflicting shortcut: Quill should remain paused with Settings available.
 - Test Pause/Resume and shortcut changes while paused; verify quitting releases registrations.
+- Check that startup preloads popup and Settings without showing either window or changing focus.
+- Open Settings twice without closing it; edits should remain. Cancel, reopen, and verify
+  the discarded edits are absent. Saved edits should appear in the next prepared dialog.
+- Force a preload failure during development; ordinary popup and Settings opening must remain available.
 - Select text in Notepad and a browser, then run an action against a configured API.
 - Change focus or selection while waiting: the original text must remain untouched.
 - Test Korean IME, multiline text, repeated identical selections, and multi-monitor taskbars.
@@ -36,3 +40,7 @@ Before distributing a release, check:
 - Quit during a request and verify that no background process remains.
 
 Automated tests use fake API responses and clipboard/input doubles. They do not spend API credits or send keystrokes to other applications. DPAPI's real round-trip test requires access to the current Windows user profile and can be skipped in a restricted sandbox.
+
+The hidden-window tests also exercise native Windows rendering and verify that no window
+is displayed or activated. `%LOCALAPPDATA%\Quill\logs\events.log` records operation stages
+and redacted code locations locally. Do not include user data or local diagnostic logs in release ZIPs.

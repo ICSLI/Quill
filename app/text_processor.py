@@ -11,6 +11,7 @@ from typing import Optional
 import pyperclip
 from pynput.keyboard import Controller, Key
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from core.diagnostics import record
 
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ class TextWorker(QObject):
                 self._check_target()
                 return value
             if time.monotonic() >= deadline:
+                record('selection.copy_timed_out')
                 return ''
             time.sleep(0.01)
 

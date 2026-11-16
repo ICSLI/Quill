@@ -18,6 +18,7 @@ from core.config_manager import ConfigManager
 from core.crypto_manager import CryptoManager
 from core.ai_provider import OAICompatibleProvider
 from core.prompt_manager import PromptManager
+from core.diagnostics import record, record_exception
 
 # App modules
 from app.hotkey_manager import HotkeyManager
@@ -28,6 +29,7 @@ from app.tray_manager import TrayManager
 from ui.onboarding_window import OnboardingWindow
 from ui.settings_window import SettingsWindow
 from ui.popup_window import PopupWindow
+from ui.preload import prepare_hidden_window
 
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,9 @@ class QuillApp(QApplication):
         self.onboarding_window = None
         self.settings_window = None
         self.popup_window = None
+        self._ui_preload_timer = QTimer(self)
+        self._ui_preload_timer.setSingleShot(True)
+        self._ui_preload_timer.timeout.connect(self._preload_windows)
 
         # 상태
         self.current_text = ""  # 현재 선택된 텍스트
@@ -213,9 +218,11 @@ class QuillApp(QApplication):
                 )
 
             logger.info("Quill application started successfully")
+            self._ui_preload_timer.start(250)
 
         except Exception as e:
             logger.error(f"Error starting application: {e}")
+            record_exception('startup.failed', e.__traceback__)
             QMessageBox.critical(
                 None,
                 "Error",
@@ -234,9 +241,12 @@ class QuillApp(QApplication):
         """
         # AI 요청 또는 텍스트 추출 진행 중이면 무시
         if self._shutting_down or self._ai_request_in_progress or self.activeModalWidget() is not None:
+            record('hotkey.ignored', shutting_down=self._shutting_down,
+                   ai_busy=self._ai_request_in_progress, modal=self.activeModalWidget() is not None)
             logger.debug("AI request in progress, ignoring hotkey")
             return
         if self._extraction_in_progress:
+            record('hotkey.ignored', extraction_busy=True)
             logger.debug("Extraction in progress, ignoring main hotkey")
             return
 
@@ -244,8 +254,7 @@ class QuillApp(QApplication):
 
         # 일반 모드로 텍스트 추출
         self._quick_mode = False
-        self._extraction_in_progress = True
-        self.text_processor.extract_selected_text()
+        self._begin_extraction()
 
         # 참고: 텍스트가 추출되면 _on_text_extracted()가 호출됨
 
@@ -260,18 +269,20 @@ class QuillApp(QApplication):
         """
         # AI 요청 진행 중이면 무시
         if self._shutting_down or self._ai_request_in_progress or self.activeModalWidget() is not None:
+            record('quick_hotkey.ignored', shutting_down=self._shutting_down,
+                   ai_busy=self._ai_request_in_progress, modal=self.activeModalWidget() is not None)
             logger.debug("AI request in progress, ignoring quick hotkey")
             return
 
         if self._extraction_in_progress:
+            record('quick_hotkey.ignored', extraction_busy=True)
             return
 
         # 이전 액션이 없으면 일반 모드로 팝업 표시
         if not self._last_prompt_key:
             logger.debug("No previous action, falling back to normal popup")
             self._quick_mode = False
-            self._extraction_in_progress = True
-            self.text_processor.extract_selected_text()
+            self._begin_extraction()
             return
 
         # 프롬프트가 여전히 존재하는지 확인
@@ -290,10 +301,17 @@ class QuillApp(QApplication):
         self._quick_mode = True
 
 
-        self._extraction_in_progress = True
-        self.text_processor.extract_selected_text()
+        self._begin_extraction()
 
         # 참고: 텍스트가 추출되면 _on_text_extracted()가 호출됨
+
+    def _begin_extraction(self):
+        self._extraction_in_progress = True
+        record('extraction.started', quick=self._quick_mode)
+        try:
+            self.text_processor.extract_selected_text()
+        except Exception as exc:
+            self._on_text_operation_failed(str(exc))
 
     def _create_popup_window(self):
         """팝업 윈도우 생성 및 워밍업"""
@@ -304,7 +322,11 @@ class QuillApp(QApplication):
         self.popup_window.action_requested.connect(self._on_action_requested)
 
         # 워밍업: 투명 상태로 show/hide하여 렌더링 파이프라인 초기화
-        self.popup_window.ensurePolished()
+        try:
+            prepare_hidden_window(self.popup_window)
+        except Exception:
+            record('ui.preload_failed')
+            logger.exception('Could not preload popup; normal opening remains available')
 
         logger.debug("Popup window pre-created")
 
@@ -318,6 +340,7 @@ class QuillApp(QApplication):
         """
         # 추출 완료 플래그 리셋
         self._extraction_in_progress = False
+        record('extraction.completed', characters=len(text))
         if self._shutting_down:
             return
 
@@ -368,6 +391,7 @@ class QuillApp(QApplication):
             return
 
         self._ai_request_in_progress = True
+        record('ai.started')
         self._last_prompt_key = prompt_key
         self._last_instruction = instruction
         self._request_thread = threading.Thread(
@@ -396,6 +420,7 @@ class QuillApp(QApplication):
 
     @Slot(str, str)
     def _on_ai_completed(self, response: str, error: str):
+        record('ai.completed', failed=bool(error), characters=len(response))
         if self._shutting_down:
             return
         if error:
@@ -408,6 +433,7 @@ class QuillApp(QApplication):
             return
         # Keep the request busy until clipboard replacement finishes or fails.
         self._pending_response = response
+        record('replacement.started')
         try:
             self.text_processor.replace_text(response)
         except Exception as exc:
@@ -415,12 +441,14 @@ class QuillApp(QApplication):
 
     @Slot()
     def _on_text_replaced(self):
+        record('replacement.completed')
         self._pending_response = ""
         self._ai_request_in_progress = False
         logger.info("Text replacement completed")
 
     @Slot(str)
     def _on_text_operation_failed(self, message: str):
+        record('text_operation.failed', response_available=bool(getattr(self, '_pending_response', '')))
         self._ai_request_in_progress = False
         self._extraction_in_progress = False
         self._quick_mode = False
@@ -436,25 +464,56 @@ class QuillApp(QApplication):
             return
         logger.debug("Showing settings window")
 
-        # 기존 창 정리
+        self._ui_preload_timer.stop()
+        window = self._create_settings_window()
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _preload_windows(self):
+        if self._shutting_down:
+            return
+        if (self._ai_request_in_progress or self._extraction_in_progress
+                or self.activeModalWidget() is not None
+                or (self.popup_window is not None and self.popup_window.isVisible())):
+            self._ui_preload_timer.start(250)
+            return
+        try:
+            self._create_settings_window()
+        except Exception:
+            record('ui.preload_failed')
+            logger.exception('Could not preload Settings')
+
+    def _create_settings_window(self):
         if self.settings_window is not None:
-            try:
-                self.settings_window.settings_saved.disconnect(self._on_settings_saved)
-            except RuntimeError:
-                pass
-            self.settings_window.close()
-            self.settings_window.deleteLater()
-            self.settings_window = None
+            return self.settings_window
 
         # 새 창 생성
-        self.settings_window = SettingsWindow(
+        window = SettingsWindow(
             self.config_manager,
             self.crypto_manager,
             self.prompt_manager,
             hotkey_manager=self.hotkey_manager
         )
-        self.settings_window.settings_saved.connect(self._on_settings_saved)
-        self.settings_window.show()
+        window.settings_saved.connect(self._on_settings_saved)
+        window.finished.connect(self._on_settings_closed)
+        try:
+            prepare_hidden_window(window)
+            record('ui.preloaded')
+        except Exception:
+            record('ui.preload_failed')
+            logger.exception('Could not preload Settings; normal opening remains available')
+        self.settings_window = window
+        return window
+
+    @Slot(int)
+    def _on_settings_closed(self, result):
+        window = self.settings_window
+        self.settings_window = None
+        if window is not None:
+            window.deleteLater()
+        if not self._shutting_down:
+            self._ui_preload_timer.start(250)
 
     @Slot(dict)
     def _on_settings_saved(self, settings: dict):
@@ -526,6 +585,7 @@ class QuillApp(QApplication):
         if self._shutting_down:
             return
         self._shutting_down = True
+        self._ui_preload_timer.stop()
         self.hotkey_manager.stop()
         self.text_processor.cleanup()
         self.tray_manager.hide()
@@ -547,6 +607,7 @@ class QuillApp(QApplication):
             title: 에러 제목
             message: 에러 메시지
         """
+        record('dialog.opened')
         response = getattr(self, "_pending_response", "")
         if title == "Text Operation Failed" and response:
             dialog = QMessageBox()
@@ -562,6 +623,7 @@ class QuillApp(QApplication):
             self._pending_response = ""
         else:
             QMessageBox.critical(None, title, message)
+        record('dialog.closed')
 
 
 # 테스트용 진입점 (실제로는 main.py에서 실행)

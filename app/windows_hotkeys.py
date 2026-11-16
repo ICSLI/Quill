@@ -6,6 +6,7 @@ from itertools import count
 
 from PySide6.QtCore import QAbstractNativeEventFilter, QCoreApplication
 from pynput import keyboard
+from core.diagnostics import record
 
 
 MOD_NOREPEAT = 0x4000
@@ -109,6 +110,7 @@ class WindowsHotkeys(QAbstractNativeEventFilter):
                 self._api.UnregisterHotKey(None, identifier)
         self._registrations = registrations
         self._callbacks = {registrations[spec]: callback for spec, callback in requested.items()}
+        record('hotkeys.registered', count=len(self._callbacks))
 
     def nativeEventFilter(self, event_type, message):
         if bytes(event_type) not in (b'windows_generic_MSG', b'windows_dispatcher_MSG'):
@@ -117,10 +119,12 @@ class WindowsHotkeys(QAbstractNativeEventFilter):
         callback = self._callbacks.get(msg.wParam) if msg.message == WM_HOTKEY else None
         if callback is None:
             return False, 0
+        record('hotkey.received')
         callback()
         return True, 0
 
     def stop(self):
+        record('hotkeys.stopped', count=len(self._registrations))
         for identifier in self._registrations.values():
             self._api.UnregisterHotKey(None, identifier)
         self._registrations.clear()

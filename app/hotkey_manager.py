@@ -6,6 +6,7 @@ from PySide6.QtCore import QObject, Signal
 from pynput import keyboard
 from pynput.mouse import Controller as MouseController
 from app.windows_hotkeys import WindowsHotkeys, shortcut_spec
+from core.diagnostics import record
 
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,7 @@ class HotkeyManager(QObject):
             try:
                 self.hotkey_pressed.emit(*self.mouse.position)
             except Exception:
+                record('hotkey.callback_failed')
                 logger.exception('Error in main hotkey callback')
 
     def _on_quick_hotkey_activated(self):
@@ -105,6 +107,7 @@ class HotkeyManager(QObject):
             try:
                 self.quick_hotkey_pressed.emit(*self.mouse.position)
             except Exception:
+                record('quick_hotkey.callback_failed')
                 logger.exception('Error in quick hotkey callback')
 
     def is_running(self):

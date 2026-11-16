@@ -27,6 +27,7 @@ sys.path.insert(0, str(project_root))
 
 from app.application import QuillApp
 from core.single_instance import SingleInstanceLock
+from core.diagnostics import setup_diagnostics, report_unhandled, record_exception, record
 
 
 def setup_logging():
@@ -67,6 +68,8 @@ def main():
             )
             sys.exit(1)
 
+        setup_diagnostics()
+        sys.excepthook = report_unhandled
         logger.info("="* 50)
         logger.info("Quill - AI Writing Assistant")
         logger.info("="* 50)
@@ -74,6 +77,7 @@ def main():
         # 애플리케이션 실행
         app = QuillApp(sys.argv)
         exit_code = app.exec()
+        record('session.finished', exit_code=exit_code)
 
         # Lock 해제
         sys.exit(exit_code)
@@ -83,6 +87,7 @@ def main():
         sys.exit(0)
 
     except Exception as e:
+        record_exception('session.failed', e.__traceback__)
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
     finally:
