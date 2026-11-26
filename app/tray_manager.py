@@ -21,6 +21,7 @@ class TrayManager(QObject):
 
     # Signals
     settings_requested = Signal()
+    copy_response_requested = Signal()
     pause_toggled = Signal(bool)  # True: paused, False: resumed
     quit_requested = Signal()
 
@@ -36,9 +37,11 @@ class TrayManager(QObject):
         self.tray_icon: Optional[QSystemTrayIcon] = None
         self.tray_menu: Optional[QMenu] = None
         self.is_paused: bool = False
+        self._response_available = False
 
         # 액션들
         self.action_settings: Optional[QAction] = None
+        self.action_copy_response: Optional[QAction] = None
         self.action_pause: Optional[QAction] = None
         self.action_quit: Optional[QAction] = None
 
@@ -133,6 +136,11 @@ class TrayManager(QObject):
         self.action_settings.triggered.connect(self._on_settings_clicked)
         self.tray_menu.addAction(self.action_settings)
 
+        self.action_copy_response = QAction("Copy Last Response", self.tray_menu)
+        self.action_copy_response.setEnabled(self._response_available)
+        self.action_copy_response.triggered.connect(self.copy_response_requested)
+        self.tray_menu.addAction(self.action_copy_response)
+
         # 구분선
         self.tray_menu.addSeparator()
 
@@ -153,6 +161,11 @@ class TrayManager(QObject):
         self.tray_icon.setContextMenu(self.tray_menu)
 
         logger.debug("Tray menu created with actions")
+
+    def set_response_available(self):
+        self._response_available = True
+        if self.action_copy_response is not None:
+            self.action_copy_response.setEnabled(True)
 
     def _on_settings_clicked(self):
         """Settings 메뉴 클릭 시"""

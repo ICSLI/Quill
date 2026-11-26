@@ -61,11 +61,15 @@ class DiagnosticsTests(unittest.TestCase):
                  patch.object(main, 'setup_diagnostics', side_effect=lambda: diagnostics.setup_diagnostics(directory)), \
                  patch.object(main, 'SingleInstanceLock', return_value=Mock(acquire=Mock(return_value=True))), \
                  patch.object(main, 'QuillApp', side_effect=RuntimeError('private response')), \
+                 patch.object(main, 'QApplication'), \
+                 patch.object(main.QMessageBox, 'critical') as dialog, \
                  patch.object(sys, 'excepthook'):
                 with self.assertLogs('__main__' if main.__name__ == '__main__' else 'main', level='ERROR'):
                     with self.assertRaises(SystemExit) as raised:
                         main.main()
                 self.assertEqual(raised.exception.code, 1)
+                dialog.assert_called_once()
+                self.assertNotIn('private response', dialog.call_args.args[2])
             for handler in self.logger.handlers:
                 handler.close()
             contents = (Path(directory) / 'events.log').read_text(encoding='utf-8')

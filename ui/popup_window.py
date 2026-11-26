@@ -6,18 +6,24 @@
 """
 
 import logging
+from html import escape
 from pathlib import Path
+from time import perf_counter
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QTextEdit, QLabel, QFrame
+    QTextEdit, QLabel, QFrame, QSizePolicy, QStyle, QStyleOptionButton
 )
-from PySide6.QtCore import Qt, Signal, QEvent
-from PySide6.QtGui import QKeyEvent, QCursor, QScreen, QIcon
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer
+from PySide6.QtGui import QKeyEvent, QCursor, QScreen, QIcon, QFontMetrics, QGuiApplication
 
 from ui.styles import apply_dark_theme
+from core.diagnostics import record
 
 
 logger = logging.getLogger(__name__)
+_PREVIEW_WIDTH = 190
+_COLD_PREVIEW_QUIET_MS = 250
+_FONT_SAMPLE = "Quill — café 한글 日本語 简体字 العربية हिन्दी 🪶"
 
 
 class PopupWindow(QWidget):
@@ -32,6 +38,15 @@ class PopupWindow(QWidget):
 
         self.selected_text = ""
         self._action_submitted = False
+        self._ime_composing = False
+        self._action_buttons = {}
+        self._default_action_names = {}
+        self._action_names = {}
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self._update_preview)
+        self._preview_fonts_ready = False
+        self._preview_after_paint = False
 
         # 윈도우 플래그 설정
         self.setWindowFlags(
@@ -74,6 +89,9 @@ class PopupWindow(QWidget):
         self.preview_label = QLabel("Select text to process")
         self.preview_label.setTextFormat(Qt.TextFormat.PlainText)
         self.preview_label.setObjectName("previewLabel")
+        preview_policy = self.preview_label.sizePolicy()
+        preview_policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+        self.preview_label.setSizePolicy(preview_policy)
         text_info_layout.addWidget(self.preview_label)
 
         self.char_count_label = QLabel("0 characters")
@@ -120,6 +138,15 @@ class PopupWindow(QWidget):
 
         layout.addLayout(quick_actions_2)
 
+        self._action_buttons = {
+            self.btn_grammar: "grammar_check", self.btn_rewrite: "rewrite",
+            self.btn_summarize: "summarize", self.btn_translate: "translate",
+        }
+        for button, key in self._action_buttons.items():
+            self._default_action_names[key] = button.text()
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, button.sizePolicy().verticalPolicy())
+            button.installEventFilter(self)
+
         # 구분선
         separator2 = QFrame()
         separator2.setFrameShape(QFrame.Shape.HLine)
@@ -163,8 +190,22 @@ class PopupWindow(QWidget):
         이벤트 필터 - prompt_input에서 Enter/Shift+Enter 처리
         """
         # prompt_input의 키 이벤트 처리
+        if event.type() in (
+            QEvent.Type.Resize, QEvent.Type.FontChange, QEvent.Type.StyleChange,
+            QEvent.Type.DevicePixelRatioChange,
+        ) and obj in self._action_buttons:
+            self._update_action_label(obj)
+
+        if obj == self.prompt_input and event.type() == QEvent.Type.InputMethod:
+            self._ime_composing = bool(event.preeditString())
+        if obj == self.prompt_input and event.type() in (QEvent.Type.KeyPress, QEvent.Type.InputMethod):
+            if not self._preview_fonts_ready and self._preview_timer.isActive():
+                # Keep the cold measurement out of the initial typing burst.
+                self._preview_timer.start(_COLD_PREVIEW_QUIET_MS)
         if obj == self.prompt_input and event.type() == QEvent.Type.KeyPress:
             if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+                if self._ime_composing:
+                    return False
                 modifiers = event.modifiers()
                 if modifiers & Qt.KeyboardModifier.ShiftModifier:
                     # Shift+Enter: 줄바꿈 (기본 동작)
@@ -175,6 +216,26 @@ class PopupWindow(QWidget):
                     return True
 
         return super().eventFilter(obj, event)
+
+    def set_prompt_names(self, names: dict):
+        """Use saved names for existing actions without changing their prompt keys."""
+        self._action_names = {
+            key: names.get(key) if isinstance(names.get(key), str) and names[key].strip() else default
+            for key, default in self._default_action_names.items()
+        }
+        for button in self._action_buttons:
+            self._update_action_label(button)
+
+    def _update_action_label(self, button):
+        key = self._action_buttons[button]
+        name = self._action_names.get(key, self._default_action_names[key])
+        option = QStyleOptionButton()
+        option.initFrom(button)
+        contents = button.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, button)
+        label = button.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, max(0, contents.width()))
+        button.setText(label.replace("&", "&&"))
+        # Qt interprets markup in tooltips, so keep user-entered names as text.
+        button.setToolTip(f"<span>{escape(name, quote=False)}</span>")
 
     def keyPressEvent(self, event: QKeyEvent):
         """키 입력 이벤트: ESC로 닫기"""
@@ -218,52 +279,42 @@ class PopupWindow(QWidget):
 
         logger.warning("Could not load icon for popup header")
 
-    def _update_preview(self, text: str):
-        """텍스트 미리보기 업데이트"""
-        if not text:
-            self.preview_label.setText("Select text to process")
-            self.char_count_label.setText("0 characters")
+    def prepare_preview_fonts(self):
+        """Exercise common fallback fonts without painting or changing the label."""
+        if not self._preview_fonts_ready:
+            QFontMetrics(self.preview_label.font()).horizontalAdvance(_FONT_SAMPLE)
+            self._preview_fonts_ready = True
+
+    def _update_preview(self):
+        if not self.isVisible() or not self.selected_text:
             return
+        start = perf_counter()
+        prefix = self.selected_text[:256]
+        snippet = " ".join(prefix.splitlines())
+        if len(prefix) < len(self.selected_text):
+            snippet += "\u2026"
+        metrics = QFontMetrics(self.preview_label.font())
+        width = min(_PREVIEW_WIDTH, self.preview_label.contentsRect().width())
+        available = max(0, width - metrics.horizontalAdvance('""'))
+        preview = metrics.elidedText(snippet, Qt.TextElideMode.ElideRight, available)
+        self.preview_label.setText(f'"{preview}"')
+        record('ui.preview_updated', elapsed_ms=round((perf_counter() - start) * 1000),
+               fonts_prepared=self._preview_fonts_ready)
 
-        # 글자수 표시 (전체 텍스트 길이)
-        char_count = len(text)
-        if char_count == 1:
-            self.char_count_label.setText("1 character")
-        else:
-            self.char_count_label.setText(f"{char_count} characters")
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._preview_after_paint:
+            self._preview_after_paint = False
+            self._preview_timer.start(0)
 
-        # 성능 최적화: 먼저 앞부분만 추출 (최대 50자면 충분)
-        preview_source = text[:50]
-
-        # 줄바꿈을 공백으로 변환
-        clean_text = preview_source.replace('\n', ' ').replace('\r', '')
-
-        # QFontMetrics로 수동 truncate (elidedText가 CJK에서 부정확함)
-        from PySide6.QtGui import QFontMetrics
-        fm = QFontMetrics(self.preview_label.font())
-
-        # 사용 가능한 너비 (팝업 280 - 마진 24 - 아이콘 40 - 간격 10 = 206, 여유분 16px)
-        max_width = 190
-
-        # 글자 단위로 truncate
-        ellipsis = "..."
-        ellipsis_width = fm.horizontalAdvance(ellipsis)
-        quote_width = fm.horizontalAdvance('""')
-
-        truncated = clean_text
-        while fm.horizontalAdvance(truncated) + quote_width > max_width and len(truncated) > 0:
-            truncated = truncated[:-1]
-
-        # 원본 텍스트가 truncated보다 길면 말줄임표 추가
-        if len(text) > len(truncated):
-            # 말줄임표 공간 확보
-            while fm.horizontalAdvance(truncated) + quote_width + ellipsis_width > max_width and len(truncated) > 0:
-                truncated = truncated[:-1]
-            preview_text = f'"{truncated}..."'
-        else:
-            preview_text = f'"{truncated}"'
-
-        self.preview_label.setText(preview_text)
+    def hideEvent(self, event):
+        if not self.isVisible():
+            self._preview_timer.stop()
+            self._preview_after_paint = False
+            self.selected_text = ""
+            self._ime_composing = False
+            self.preview_label.clear()
+        super().hideEvent(event)
 
     def show_at_position(self, x: int, y: int, text: str):
         """
@@ -274,14 +325,18 @@ class PopupWindow(QWidget):
             y: Y 좌표
             text: 선택된 텍스트
         """
+        self._preview_timer.stop()
         self.selected_text = text
         self._action_submitted = False
+        self._ime_composing = False
 
         # 입력칸 초기화 (이전 입력 제거)
         self.prompt_input.clear()
 
-        # 텍스트 미리보기 업데이트
-        self._update_preview(text)
+        # Show a stable first frame without measuring the selected text.
+        self.preview_label.setText("Selected text" if text else "Select text to process")
+        count = len(text)
+        self.char_count_label.setText("1 character" if count == 1 else f"{count} characters")
 
         # 위젯 크기 조정
         self.adjustSize()
@@ -323,13 +378,14 @@ class PopupWindow(QWidget):
             self.move(x, y + 20)
 
         # 표시
+        self._preview_after_paint = bool(text and self._preview_fonts_ready)
+        self.prompt_input.setFocus(Qt.FocusReason.PopupFocusReason)
         self.show()
         self.raise_()  # 최상위로
         self.activateWindow()
 
-        # 약간의 지연 후 포커스 (이벤트 필터가 올바르게 작동하도록)
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(50, self._focus_input)
+        if text and not self._preview_fonts_ready:
+            self._preview_timer.start(_COLD_PREVIEW_QUIET_MS)
 
         logger.debug(f"Popup shown at ({x}, {y}), text length: {len(text)}")
 
@@ -360,9 +416,13 @@ class PopupWindow(QWidget):
         Args:
             prompt_key: 프롬프트 키 (grammar_check, rewrite, etc.)
         """
-        instruction = self.prompt_input.toPlainText().strip()
         if self._action_submitted or not self.selected_text.strip():
             return
+        if self._ime_composing:
+            QGuiApplication.inputMethod().commit()
+            if self._ime_composing:
+                return
+        instruction = self.prompt_input.toPlainText().strip()
         if prompt_key == "custom" and not instruction:
             self.prompt_input.setFocus()
             return
@@ -375,11 +435,6 @@ class PopupWindow(QWidget):
 
     def _update_send_enabled(self):
         self.btn_send.setEnabled(bool(self.prompt_input.toPlainText().strip()))
-
-    def _focus_input(self):
-        if self.isVisible():
-            self.prompt_input.setFocus()
-
 
 # 테스트 코드
 if __name__ == "__main__":

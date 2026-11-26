@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional
 
 from core.crypto_manager import CryptoManager
 from core.ai_provider import validate_api_url
-from core.storage import atomic_write_json
+from core.storage import atomic_write_json, back_up_file
 
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ class ConfigManager:
             raise FileNotFoundError(f"Config file not found: {self.config_path}")
 
         try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
+            with open(self.config_path, 'r', encoding='utf-8-sig') as f:
                 loaded = json.load(f)
             self._validate_structure(loaded)
             self._config = deepcopy(loaded)
@@ -239,13 +239,19 @@ class ConfigManager:
             logger.error(f"Failed to encrypt API key: {e}")
             raise RuntimeError("Failed to encrypt API key") from e
 
-    def create_default_config(self) -> None:
-        """
-        기본 설정 파일 생성
-        """
-        logger.info("Creating default config")
-        self._config = deepcopy(self.DEFAULT_CONFIG)
-        self.save()
+    def create_default_config(self, *, base_url=None, model=None, api_key="") -> None:
+        """Persist new settings once, after preparing the complete configuration."""
+        candidate = deepcopy(self.DEFAULT_CONFIG)
+        api = candidate["api"]
+        if base_url is not None:
+            api["base_url"] = validate_api_url(base_url)
+        if model is not None:
+            api["model"] = model
+        if api_key:
+            api["api_key_encrypted"] = self.crypto.encrypt(api_key)
+        if self.config_path.exists():
+            back_up_file(self.config_path)
+        self.save(candidate)
 
     def get_all(self) -> Dict[str, Any]:
         """

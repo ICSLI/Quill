@@ -2,11 +2,14 @@ import os
 import subprocess
 import sys
 import textwrap
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.application import QuillApp
+from core.config_manager import ConfigManager
 
 
 class ApplicationLifecycleTests(unittest.TestCase):
@@ -187,7 +190,7 @@ class ApplicationLifecycleTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def make_app(self):
-        return SimpleNamespace(
+        app = SimpleNamespace(
             _shutting_down=False, _start_paused=False, _ai_request_in_progress=True, activeModalWidget=lambda: None,
             _extraction_in_progress=False, _quick_mode=False,
             text_processor=Mock(), ai_provider=Mock(), hotkey_manager=Mock(),
@@ -195,8 +198,17 @@ class ApplicationLifecycleTests(unittest.TestCase):
             _request_thread=None, popup_window=None, settings_window=None,
             onboarding_window=None, _ai_completed=Mock(),
             _ui_preload_timer=Mock(),
+            _preview_font_timer=Mock(),
             quit=Mock(),
         )
+        app._api_setup_error = ''
+        app._paste_pending = False
+        app._last_response = ''
+        app._copy_response = lambda response: QuillApp._copy_response(app, response)
+        app._configure_provider = lambda: QuillApp._configure_provider(app)
+        app._notify_api_setup_error = lambda: QuillApp._notify_api_setup_error(app)
+        app._refresh_popup_prompt_names = lambda: QuillApp._refresh_popup_prompt_names(app)
+        return app
 
     def test_success_remains_busy_until_paste_finishes(self):
         app = self.make_app()
@@ -205,6 +217,22 @@ class ApplicationLifecycleTests(unittest.TestCase):
         self.assertTrue(app._ai_request_in_progress)
         QuillApp._on_text_replaced(app)
         self.assertFalse(app._ai_request_in_progress)
+        with patch('app.application.pyperclip.copy') as copy:
+            QuillApp._copy_last_response(app)
+        copy.assert_called_once_with('replacement')
+
+    def test_only_replacement_failure_offers_the_pending_response(self):
+        app = self.make_app()
+        QuillApp._on_ai_completed(app, 'generated result', '')
+        QuillApp._on_text_operation_failed(app, 'source changed')
+        app._show_error_dialog.assert_called_once_with(
+            'Text Operation Failed', 'source changed', response='generated result',
+        )
+        app._show_error_dialog.reset_mock()
+        QuillApp._on_text_operation_failed(app, 'unrelated copy failure')
+        app._show_error_dialog.assert_called_once_with(
+            'Text Operation Failed', 'unrelated copy failure', response='',
+        )
 
     def test_error_and_empty_response_leave_original_untouched(self):
         for response, error in [('', 'timeout'), (' \n', '')]:
@@ -245,6 +273,26 @@ class ApplicationLifecycleTests(unittest.TestCase):
         QuillApp._preload_windows(app)
         app._create_settings_window.assert_not_called()
         app._ui_preload_timer.start.assert_not_called()
+
+    def test_preview_fonts_wait_until_no_work_or_visible_settings(self):
+        app = self.make_app()
+        app.popup_window = Mock(isVisible=Mock(return_value=False))
+        app.settings_window = Mock(isVisible=Mock(return_value=True))
+        app.activePopupWidget = Mock()
+        for ai_busy, settings_visible, menu_visible in ((True, False, False), (False, True, False), (False, False, True)):
+            app._ai_request_in_progress = ai_busy
+            app.settings_window.isVisible.return_value = settings_visible
+            app.activePopupWidget.return_value = object() if menu_visible else None
+            QuillApp._preload_preview_fonts(app)
+        app.popup_window.prepare_preview_fonts.assert_not_called()
+        self.assertEqual(app._preview_font_timer.start.call_count, 3)
+        app.settings_window.isVisible.return_value = False
+        app.activePopupWidget.return_value = None
+        QuillApp._preload_preview_fonts(app)
+        app.popup_window.prepare_preview_fonts.assert_called_once()
+        app._shutting_down = True
+        QuillApp._preload_preview_fonts(app)
+        app.popup_window.prepare_preview_fonts.assert_called_once()
 
     def test_cleanup_defers_client_close_to_active_worker(self):
         app = self.make_app()
@@ -310,6 +358,55 @@ class ApplicationLifecycleTests(unittest.TestCase):
         app.tray_manager.set_paused.assert_called_once_with(True)
         app.tray_manager.show_message.assert_called_once()
         quit_timer.assert_not_called()
+
+    def test_unreadable_api_key_keeps_startup_and_settings_recovery_available(self):
+        app = self.make_app()
+        app._ai_request_in_progress = False
+        app.config_manager = Mock()
+        settings = {'api.base_url': 'http://localhost/v1', 'api.model': 'model'}
+        app.config_manager.get.side_effect = lambda key, default=None: settings.get(key, default)
+        app.config_manager.get_api_key.side_effect = [RuntimeError('cannot decrypt'), 'new key']
+        app._create_popup_window = Mock()
+        QuillApp._start_app(app)
+
+        app.tray_manager.create_tray_icon.assert_called_once()
+        app.tray_manager.show_message.assert_called_once()
+        app._ui_preload_timer.start.assert_called_once_with(250)
+        app.hotkey_manager.start.assert_called_once()
+        app.ai_provider.configure.assert_not_called()
+        app.config_manager.save.assert_not_called()
+        QuillApp._on_action_requested(app, 'rewrite', 'selected text', '')
+        self.assertFalse(app._ai_request_in_progress)
+        app._show_error_dialog.assert_called_once_with('Quill API setup', app._api_setup_error)
+
+        QuillApp._on_settings_saved(app, {})
+        app.ai_provider.configure.assert_called_once_with('http://localhost/v1', 'new key', 'model')
+        self.assertFalse(app._api_setup_error)
+
+    def test_failed_onboarding_encryption_does_not_finish_setup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            app = self.make_app()
+            app.config_manager = ConfigManager(str(Path(folder) / 'config.json'))
+            app._start_app = Mock()
+            with patch.object(app.config_manager.crypto, 'encrypt', side_effect=RuntimeError('encrypt failed')), \
+                 patch('app.application.QMessageBox.critical'), self.assertLogs('app.application', level='ERROR'):
+                QuillApp._on_onboarding_completed(app, 'http://localhost/v1', 'new key', 'model')
+            self.assertFalse(app.config_manager.config_path.exists())
+            app._start_app.assert_not_called()
+
+            with patch.object(app.config_manager.crypto, 'encrypt', return_value='encrypted-key'):
+                QuillApp._on_onboarding_completed(app, 'http://localhost/v1', 'new key', 'model')
+            app._start_app.assert_called_once_with()
+            self.assertEqual(app.config_manager.get('api.base_url'), 'http://localhost/v1')
+            self.assertEqual(app.config_manager.get('api.api_key_encrypted'), 'encrypted-key')
+
+    def test_unexpected_provider_error_does_not_display_exception_text(self):
+        app = self.make_app()
+        app.ai_provider.complete.side_effect = RuntimeError('private selection')
+        with patch('app.application.record_exception') as recorded:
+            QuillApp._process_ai_request(app, [], 0.5, {})
+        self.assertEqual(recorded.call_args.args[0], 'ai.unexpected_failure')
+        self.assertNotIn('private selection', app._ai_completed.emit.call_args.args[1])
 
     def test_caught_startup_error_records_only_redacted_traceback(self):
         app = self.make_app()

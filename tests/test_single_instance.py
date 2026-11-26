@@ -8,6 +8,16 @@ from core.single_instance import SingleInstanceLock
 
 
 class SingleInstanceTests(unittest.TestCase):
+    def test_unusable_data_directory_is_not_reported_as_another_instance(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'data'
+            path.touch()
+            lock = SingleInstanceLock()
+            lock.lock_file_path = path / 'quill.lock'
+            with self.assertRaises(OSError):
+                lock.acquire()
+            self.assertIsNone(lock.lock_file)
+
     def test_cross_process_lock_survives_contention_and_can_be_reacquired(self):
         with tempfile.TemporaryDirectory() as folder:
             lock = SingleInstanceLock()

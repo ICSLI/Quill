@@ -8,7 +8,9 @@ import logging
 import sys
 import threading
 from pathlib import Path
+from time import perf_counter
 
+import pyperclip
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import Slot, Signal, QTimer
 from PySide6.QtGui import QIcon
@@ -16,7 +18,7 @@ from PySide6.QtGui import QIcon
 # Core modules
 from core.config_manager import ConfigManager
 from core.crypto_manager import CryptoManager
-from core.ai_provider import OAICompatibleProvider
+from core.ai_provider import APIProviderError, OAICompatibleProvider
 from core.prompt_manager import PromptManager
 from core.diagnostics import record, record_exception
 
@@ -33,6 +35,7 @@ from ui.preload import prepare_hidden_window
 
 
 logger = logging.getLogger(__name__)
+_PREVIEW_FONT_WARMUP_DELAY_MS = 1000
 
 
 class QuillApp(QApplication):
@@ -73,9 +76,9 @@ class QuillApp(QApplication):
         self._ui_preload_timer = QTimer(self)
         self._ui_preload_timer.setSingleShot(True)
         self._ui_preload_timer.timeout.connect(self._preload_windows)
-
-        # 상태
-        self.current_text = ""  # 현재 선택된 텍스트
+        self._preview_font_timer = QTimer(self)
+        self._preview_font_timer.setSingleShot(True)
+        self._preview_font_timer.timeout.connect(self._preload_preview_fonts)
 
         # 빠른 반복 실행용 마지막 액션 저장
         self._last_prompt_key: str = ""
@@ -87,7 +90,9 @@ class QuillApp(QApplication):
         self._shutting_down = False
         self._request_thread = None
         self._ai_request_in_progress = False
-        self._pending_response = ""
+        self._api_setup_error = ""
+        self._paste_pending = False
+        self._last_response = ""
 
         # Signal/Slot 연결
         self._connect_signals()
@@ -130,6 +135,7 @@ class QuillApp(QApplication):
 
         # Tray Manager
         self.tray_manager.settings_requested.connect(self._show_settings)
+        self.tray_manager.copy_response_requested.connect(self._copy_last_response)
         self.tray_manager.pause_toggled.connect(self._on_pause_toggled)
         self.tray_manager.quit_requested.connect(self._on_quit_requested)
 
@@ -140,7 +146,7 @@ class QuillApp(QApplication):
 
     def _show_onboarding(self):
         """온보딩 창 표시"""
-        self.onboarding_window = OnboardingWindow()
+        self.onboarding_window = OnboardingWindow(recovering_settings=self.config_manager.config_path.exists())
         self.onboarding_window.setup_completed.connect(self._on_onboarding_completed)
         self.onboarding_window.rejected.connect(self._on_onboarding_cancelled)
         self.onboarding_window.show()
@@ -163,12 +169,7 @@ class QuillApp(QApplication):
         """
         try:
             # 설정 저장
-            self.config_manager.create_default_config()
-            self.config_manager.set("api.base_url", base_url)
-            self.config_manager.set("api.model", model)
-            if api_key:
-                self.config_manager.set_api_key(api_key)
-            self.config_manager.save()
+            self.config_manager.create_default_config(base_url=base_url, model=model, api_key=api_key)
 
             logger.info("Onboarding completed, configuration saved")
 
@@ -190,16 +191,9 @@ class QuillApp(QApplication):
             # 설정 로드
             self.config_manager.load()
 
-            # AI Provider 설정
-            base_url = self.config_manager.get("api.base_url")
-            api_key = self.config_manager.get_api_key()
-            model = self.config_manager.get("api.model")
-
-            self.ai_provider.configure(base_url, api_key, model)
-            logger.info("AI provider configured")
-
             # Keep recovery controls available even if Windows rejects a shortcut.
             self.tray_manager.create_tray_icon()
+            self._configure_provider()
             self._create_popup_window()
             if self._start_paused:
                 self.hotkey_manager.pause()
@@ -219,6 +213,7 @@ class QuillApp(QApplication):
 
             logger.info("Quill application started successfully")
             self._ui_preload_timer.start(250)
+            self._preview_font_timer.start(_PREVIEW_FONT_WARMUP_DELAY_MS)
 
         except Exception as e:
             logger.error(f"Error starting application: {e}")
@@ -249,6 +244,9 @@ class QuillApp(QApplication):
             record('hotkey.ignored', extraction_busy=True)
             logger.debug("Extraction in progress, ignoring main hotkey")
             return
+        if self.popup_window is not None and self.popup_window.isVisible():
+            record('hotkey.ignored', popup_open=True)
+            return
 
         logger.debug(f"Main hotkey pressed at ({x}, {y})")
 
@@ -276,6 +274,9 @@ class QuillApp(QApplication):
 
         if self._extraction_in_progress:
             record('quick_hotkey.ignored', extraction_busy=True)
+            return
+        if self.popup_window is not None and self.popup_window.isVisible():
+            record('quick_hotkey.ignored', popup_open=True)
             return
 
         # 이전 액션이 없으면 일반 모드로 팝업 표시
@@ -320,12 +321,14 @@ class QuillApp(QApplication):
 
         self.popup_window = PopupWindow()
         self.popup_window.action_requested.connect(self._on_action_requested)
+        self._refresh_popup_prompt_names()
 
-        # 워밍업: 투명 상태로 show/hide하여 렌더링 파이프라인 초기화
+        # Prepare the hidden window without activating it.
         try:
             prepare_hidden_window(self.popup_window)
+            record('ui.popup_preloaded')
         except Exception:
-            record('ui.preload_failed')
+            record('ui.popup_preload_failed')
             logger.exception('Could not preload popup; normal opening remains available')
 
         logger.debug("Popup window pre-created")
@@ -350,7 +353,6 @@ class QuillApp(QApplication):
             return
 
         logger.debug(f"Text extracted (length: {len(text)}), quick_mode={self._quick_mode}")
-        self.current_text = text
 
         # 빠른 실행 모드: 팝업 없이 바로 AI 호출
         if self._quick_mode:
@@ -367,7 +369,9 @@ class QuillApp(QApplication):
         # 마우스 위치에 팝업 표시
         from PySide6.QtGui import QCursor
         cursor_pos = QCursor.pos()
+        start = perf_counter()
         self.popup_window.show_at_position(cursor_pos.x(), cursor_pos.y(), text)
+        record('ui.popup_shown', elapsed_ms=round((perf_counter() - start) * 1000))
 
     @Slot(str, str, str)
     def _on_action_requested(self, prompt_key: str, text: str, instruction: str):
@@ -380,6 +384,9 @@ class QuillApp(QApplication):
             instruction: 사용자 지시사항
         """
         if self._shutting_down or self._ai_request_in_progress or not text.strip():
+            return
+        if self._api_setup_error:
+            self._show_error_dialog("Quill API setup", self._api_setup_error)
             return
         try:
             # Capture settings and prompts on the GUI thread before starting work.
@@ -409,9 +416,11 @@ class QuillApp(QApplication):
         response, error = "", ""
         try:
             response = self.ai_provider.complete(messages, temperature, None, additional_params)
+        except APIProviderError as exc:
+            error = str(exc)
         except Exception as exc:
-            logger.error("AI request failed", exc_info=True)
-            error = f"{type(exc).__name__}: {exc}"
+            record_exception('ai.unexpected_failure', exc.__traceback__)
+            error = "Quill could not complete the request. Check Settings and try again."
         finally:
             if self._shutting_down:
                 self.ai_provider.close()
@@ -432,7 +441,9 @@ class QuillApp(QApplication):
             self._show_error_dialog("AI Request Failed", "The API returned an empty response.")
             return
         # Keep the request busy until clipboard replacement finishes or fails.
-        self._pending_response = response
+        self._last_response = response
+        self._paste_pending = True
+        self.tray_manager.set_response_available()
         record('replacement.started')
         try:
             self.text_processor.replace_text(response)
@@ -441,19 +452,39 @@ class QuillApp(QApplication):
 
     @Slot()
     def _on_text_replaced(self):
-        record('replacement.completed')
-        self._pending_response = ""
+        record('replacement.sent')
+        self._paste_pending = False
         self._ai_request_in_progress = False
-        logger.info("Text replacement completed")
+        logger.info("Paste shortcut sent")
+
+    @Slot()
+    def _copy_last_response(self):
+        if self._shutting_down or not self._last_response:
+            return
+        if self._ai_request_in_progress or self._extraction_in_progress:
+            self.tray_manager.show_message("Quill is busy", "Wait for the current operation before copying the response.")
+            return
+        self._copy_response(self._last_response)
+
+    def _copy_response(self, response):
+        try:
+            # Publish text immediately. A clipboard worker should never need the
+            # GUI thread to render a response while that thread waits for cleanup.
+            pyperclip.copy(response)
+        except Exception as exc:
+            record_exception('ui.response_copy_failed', exc.__traceback__)
+            QMessageBox.warning(None, "Copy Response Failed", "Could not open the clipboard. Try copying the response again.")
 
     @Slot(str)
     def _on_text_operation_failed(self, message: str):
-        record('text_operation.failed', response_available=bool(getattr(self, '_pending_response', '')))
+        response = self._last_response if self._paste_pending else ""
+        self._paste_pending = False
+        record('text_operation.failed', response_available=bool(response))
         self._ai_request_in_progress = False
         self._extraction_in_progress = False
         self._quick_mode = False
         if not self._shutting_down:
-            self._show_error_dialog("Text Operation Failed", message)
+            self._show_error_dialog("Text Operation Failed", message, response=response)
 
     def _show_settings(self):
         """설정 창 표시"""
@@ -464,14 +495,16 @@ class QuillApp(QApplication):
             return
         logger.debug("Showing settings window")
 
+        start = perf_counter()
         self._ui_preload_timer.stop()
         window = self._create_settings_window()
         window.show()
         window.raise_()
         window.activateWindow()
+        record('ui.settings_shown', elapsed_ms=round((perf_counter() - start) * 1000))
 
     def _preload_windows(self):
-        if self._shutting_down:
+        if self._shutting_down or self.settings_window is not None:
             return
         if (self._ai_request_in_progress or self._extraction_in_progress
                 or self.activeModalWidget() is not None
@@ -479,10 +512,12 @@ class QuillApp(QApplication):
             self._ui_preload_timer.start(250)
             return
         try:
-            self._create_settings_window()
+            window = self._create_settings_window()
+            prepare_hidden_window(window)
+            record('ui.preloaded')
         except Exception:
             record('ui.preload_failed')
-            logger.exception('Could not preload Settings')
+            logger.exception('Could not preload Settings; normal opening remains available')
 
     def _create_settings_window(self):
         if self.settings_window is not None:
@@ -497,14 +532,24 @@ class QuillApp(QApplication):
         )
         window.settings_saved.connect(self._on_settings_saved)
         window.finished.connect(self._on_settings_closed)
-        try:
-            prepare_hidden_window(window)
-            record('ui.preloaded')
-        except Exception:
-            record('ui.preload_failed')
-            logger.exception('Could not preload Settings; normal opening remains available')
         self.settings_window = window
         return window
+
+    def _preload_preview_fonts(self):
+        if self._shutting_down or self.popup_window is None:
+            return
+        if (self._ai_request_in_progress or self._extraction_in_progress
+                or self.activeModalWidget() is not None or self.activePopupWidget() is not None
+                or self.popup_window.isVisible()
+                or (self.settings_window is not None and self.settings_window.isVisible())):
+            self._preview_font_timer.start(_PREVIEW_FONT_WARMUP_DELAY_MS)
+            return
+        try:
+            start = perf_counter()
+            self.popup_window.prepare_preview_fonts()
+            record('ui.preview_fonts_prepared', elapsed_ms=round((perf_counter() - start) * 1000))
+        except Exception as exc:
+            record_exception('ui.preview_fonts_failed', exc.__traceback__)
 
     @Slot(int)
     def _on_settings_closed(self, result):
@@ -514,6 +559,33 @@ class QuillApp(QApplication):
             window.deleteLater()
         if not self._shutting_down:
             self._ui_preload_timer.start(250)
+
+    def _refresh_popup_prompt_names(self):
+        if self.popup_window is not None:
+            names = {key: info['name'] for key, info in self.prompt_manager.prompts.items()}
+            self.popup_window.set_prompt_names(names)
+
+    def _notify_api_setup_error(self):
+        self.tray_manager.show_message("Quill API setup", self._api_setup_error)
+
+    def _configure_provider(self):
+        try:
+            api_key = self.config_manager.get_api_key()
+        except RuntimeError:
+            record('api.key_unavailable')
+            self._api_setup_error = ("Quill could not read the saved API key. Open Settings to enter it again "
+                                     "or remove it if your API does not require one.")
+        else:
+            try:
+                self.ai_provider.configure(self.config_manager.get("api.base_url"), api_key,
+                                           self.config_manager.get("api.model"))
+            except Exception as exc:
+                record_exception('api.setup_failed', exc.__traceback__)
+                self._api_setup_error = "Quill could not set up the API connection. Check the Base URL, model, and API key in Settings."
+            else:
+                self._api_setup_error = ""
+                return
+        self._notify_api_setup_error()
 
     @Slot(dict)
     def _on_settings_saved(self, settings: dict):
@@ -527,11 +599,8 @@ class QuillApp(QApplication):
 
         try:
             # AI Provider 재설정
-            base_url = self.config_manager.get("api.base_url")
-            api_key = self.config_manager.get_api_key()
-            model = self.config_manager.get("api.model")
-
-            self.ai_provider.configure(base_url, api_key, model)
+            self._configure_provider()
+            self._refresh_popup_prompt_names()
 
             # SettingsWindow applies shortcuts before committing settings.
 
@@ -586,6 +655,7 @@ class QuillApp(QApplication):
             return
         self._shutting_down = True
         self._ui_preload_timer.stop()
+        self._preview_font_timer.stop()
         self.hotkey_manager.stop()
         self.text_processor.cleanup()
         self.tray_manager.hide()
@@ -598,8 +668,7 @@ class QuillApp(QApplication):
             self.ai_provider.close()
         logger.info("Cleanup complete")
 
-    @Slot(str, str)
-    def _show_error_dialog(self, title: str, message: str):
+    def _show_error_dialog(self, title: str, message: str, *, response: str = ""):
         """
         에러 다이얼로그 표시 (메인 스레드에서)
 
@@ -608,8 +677,7 @@ class QuillApp(QApplication):
             message: 에러 메시지
         """
         record('dialog.opened')
-        response = getattr(self, "_pending_response", "")
-        if title == "Text Operation Failed" and response:
+        if response:
             dialog = QMessageBox()
             dialog.setIcon(QMessageBox.Icon.Warning)
             dialog.setWindowTitle(title)
@@ -618,9 +686,8 @@ class QuillApp(QApplication):
             dialog.setDetailedText(response)
             dialog.setStandardButtons(QMessageBox.StandardButton.Close)
             copy_button = dialog.addButton("Copy Response", QMessageBox.ButtonRole.ActionRole)
-            copy_button.clicked.connect(lambda: self.clipboard().setText(response))
+            copy_button.clicked.connect(lambda: self._copy_response(response))
             dialog.exec()
-            self._pending_response = ""
         else:
             QMessageBox.critical(None, title, message)
         record('dialog.closed')

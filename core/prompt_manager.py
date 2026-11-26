@@ -5,14 +5,13 @@
 """
 
 import json
-import math
 from copy import deepcopy
 import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 from core.chatml_parser import ChatMLParser
-from core.storage import atomic_write_json
+from core.storage import atomic_write_json, back_up_file
 
 
 logger = logging.getLogger(__name__)
@@ -77,16 +76,17 @@ class PromptManager:
 
         # 2. 사용자 프롬프트 로드 (선택적)
         self.user_prompts = {}
+        self._user_prompts_need_backup = False
         if self.user_prompts_path.exists():
             try:
-                with open(self.user_prompts_path, 'r', encoding='utf-8') as f:
+                with open(self.user_prompts_path, 'r', encoding='utf-8-sig') as f:
                     loaded_user_prompts = json.load(f)
                 self.user_prompts = self._validated_prompts(loaded_user_prompts, ignore_invalid=True)
+                self._user_prompts_need_backup = len(self.user_prompts) != len(loaded_user_prompts)
                 logger.info(f"Loaded {len(self.user_prompts)} user prompts")
-            except json.JSONDecodeError as e:
-                logger.warning(f"Invalid JSON in user prompts file, ignoring: {e}")
-            except Exception as e:
-                logger.warning(f"Error loading user prompts, ignoring: {e}")
+            except (OSError, ValueError) as e:
+                self._user_prompts_need_backup = True
+                logger.warning("Could not load saved prompts: %s", type(e).__name__)
 
         # 3. 병합 (사용자 프롬프트가 우선)
         self._merge_prompts()
@@ -102,7 +102,7 @@ class PromptManager:
             raise ValueError(f"Prompt '{prompt_key}' must have a template")
         temperature = prompt.get("temperature", 0.7)
         if (isinstance(temperature, bool) or not isinstance(temperature, (int, float))
-                or not math.isfinite(temperature) or not 0 <= temperature <= 2):
+                or not 0 <= temperature <= 2):
             raise ValueError(f"Prompt '{prompt_key}' temperature must be between 0 and 2")
         if ChatMLParser.is_chatml(template):
             ChatMLParser.parse(template)
@@ -281,9 +281,17 @@ class PromptManager:
         """
         # 사용자 프롬프트가 없으면 저장하지 않음
         validated = self._validated_prompts(self.user_prompts)
+        if self._user_prompts_need_backup:
+            if self.user_prompts_path.exists():
+                back_up_file(self.user_prompts_path)
+            self._user_prompts_need_backup = False
         # Persist the empty object too: resetting the last override must survive restart.
         atomic_write_json(self.user_prompts_path, validated)
         logger.info("User prompts saved to %s", self.user_prompts_path)
+
+    @property
+    def has_unreadable_overrides(self) -> bool:
+        return self._user_prompts_need_backup
 
     def reset_prompt(self, prompt_key: str) -> None:
         """

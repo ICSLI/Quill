@@ -18,7 +18,7 @@ class ChatMLParser:
 
     # ChatML 역할 패턴: <|im_start|>role\ncontent (다음 <|im_start|> 또는 <|im_end|> 또는 문자열 끝까지)
     ROLE_PATTERN = re.compile(
-        r'<\|im_start\|>(\w+)\r?\n(.*?)(?=<\|im_start\|>|<\|im_end\|>|$)',
+        r'<\|im_start\|>(\w+)\r?\n(.*?)(?:<\|im_end\|>|(?=<\|im_start\|>|$))',
         re.DOTALL  # . matches newlines
     )
 
@@ -71,7 +71,7 @@ class ChatMLParser:
             [{'role': 'system', 'content': 'You are a helpful assistant.'},
              {'role': 'user', 'content': 'Hello!'}]
         """
-        matches = ChatMLParser.ROLE_PATTERN.findall(template)
+        matches = list(ChatMLParser.ROLE_PATTERN.finditer(template))
 
         if not matches:
             logger.warning("No valid ChatML blocks found in template")
@@ -81,11 +81,20 @@ class ChatMLParser:
             raise ValueError("Malformed ChatML message header; expected a role followed by a newline")
 
         messages = []
-        for role, content in matches:
+        previous_end = 0
+        for match in matches:
+            # End tags belong to the matched block. Any text between blocks
+            # would otherwise be silently discarded, including writing instructions.
+            if template[previous_end:match.start()].strip():
+                raise ValueError("ChatML text must be inside a message block")
+            role, content = match.groups()
             messages.append({
                 "role": role.strip(),
                 "content": content.strip()
             })
+            previous_end = match.end()
+        if template[previous_end:].strip():
+            raise ValueError("ChatML text must be inside a message block")
 
         logger.debug(f"Parsed {len(messages)} ChatML messages")
         return messages

@@ -7,7 +7,9 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, Qt
+from PySide6.QtGui import QHideEvent, QInputMethodEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 from core.config_manager import ConfigManager
 from core.prompt_manager import PromptManager
@@ -158,6 +160,164 @@ class UiQualityTests(unittest.TestCase):
             self.addCleanup(tray.hide)
             self.assertEqual(tray.action_pause.text(), "Resume")
             self.assertIs(tray.tray_icon.parent(), tray)
+
+    def test_saved_prompt_names_update_buttons_without_changing_actions(self):
+        window = PopupWindow()
+        self.addCleanup(window.close)
+        window.show_at_position(0, 0, "selected text")
+        window.set_prompt_names({"grammar_check": "Fix & polish", "extra": "Unused"})
+        self.app.processEvents()
+        self.assertEqual(window.btn_grammar.toolTip(), "<span>Fix &amp; polish</span>")
+        self.assertEqual(window.btn_rewrite.toolTip(), "<span>Rewrite</span>")
+        events = []
+        window.action_requested.connect(lambda *args: events.append(args))
+        window.btn_grammar.click()
+        self.assertEqual(events, [("grammar_check", "selected text", "")])
+        window.set_prompt_names({"grammar_check": "A&B"})
+        self.assertEqual(window.btn_grammar.text(), "A&&B")
+        window.set_prompt_names({})
+        self.assertEqual(window.btn_grammar.toolTip(), "<span>Grammar Check</span>")
+
+    def test_popup_accepts_an_action_before_the_preview_is_ready(self):
+        window = PopupWindow()
+        self.addCleanup(window.close)
+        selected = "\u65e5\u672c\u8a9e \U0001f680"
+        window.show_at_position(0, 0, selected)
+        self.assertIs(window.focusWidget(), window.prompt_input)
+        self.assertEqual(window.preview_label.text(), "Selected text")
+        self.assertEqual(window.char_count_label.text(), f"{len(selected)} characters")
+        self.assertTrue(window._preview_timer.isActive())
+        self.assertEqual(window._preview_timer.interval(), 250)
+        events = []
+        window.action_requested.connect(lambda *args: events.append(args))
+        QTest.keyClicks(window.prompt_input, "Keep the tone")
+        QTest.keyClick(window.prompt_input, Qt.Key.Key_Return)
+        self.assertEqual(events, [("custom", selected, "Keep the tone")])
+        self.assertFalse(window._preview_timer.isActive())
+
+    def test_only_the_current_popup_selection_reaches_the_preview(self):
+        window = PopupWindow()
+        self.addCleanup(window.close)
+        window.show_at_position(0, 0, "stale selection")
+        window.btn_rewrite.setFocus()
+        window.close()
+        self.assertFalse(window._preview_timer.isActive())
+        self.assertEqual(window.selected_text, "")
+        window.prepare_preview_fonts()
+        selected = "\u0627\u0644\u0646\u0635\u2028\U0001f680"
+        window.show_at_position(0, 0, selected)
+        self.assertIs(window.focusWidget(), window.prompt_input)
+        window._update_preview()
+        self.assertEqual(window.preview_label.text(), '"' + " ".join(selected.splitlines()) + '"')
+
+    def test_hide_event_while_still_visible_keeps_current_selection(self):
+        window = PopupWindow()
+        self.addCleanup(window.close)
+        window.show_at_position(0, 0, "selected")
+        QCoreApplication.sendEvent(window, QHideEvent())
+        self.assertTrue(window.isVisible())
+        self.assertEqual(window.selected_text, "selected")
+
+    def test_long_mixed_script_preview_fits_its_label(self):
+        window = PopupWindow()
+        self.addCleanup(window.close)
+        window.show_at_position(0, 0, ("\ud55c\uae00 \u65e5\u672c\u8a9e \u0627\u0644\u0646\u0635 \U0001f680 ")*40)
+        window._update_preview()
+        preview = window.preview_label.text()
+        self.assertEqual(preview.count("\u2026"), 1)
+        self.assertTrue(preview.endswith('"'))
+        self.assertLessEqual(window.preview_label.fontMetrics().horizontalAdvance(preview), 190)
+
+    def test_hidden_character_in_api_key_is_rejected_before_saving(self):
+        before = self.config.config_path.read_bytes()
+        self.window.input_api_key.setText("example\u200b")
+        self.window._on_save()
+        self.assertEqual(self.window.result(), 0)
+        self.assertEqual(self.config.config_path.read_bytes(), before)
+
+    def test_enter_does_not_submit_while_an_input_method_is_composing(self):
+        window = PopupWindow()
+        self.addCleanup(window.close)
+        window.show_at_position(0, 0, "selected")
+        window.prompt_input.setPlainText("Keep ")
+        actions = []
+        window.action_requested.connect(lambda *args: actions.append(args))
+        text = "\ud55c"
+        QCoreApplication.sendEvent(window.prompt_input, QInputMethodEvent(text, []))
+        QTest.keyClick(window.prompt_input, Qt.Key.Key_Return)
+        self.assertEqual(actions, [])
+        self.assertTrue(window.isVisible())
+
+        committed = QInputMethodEvent()
+        committed.setCommitString(text)
+        QCoreApplication.sendEvent(window.prompt_input, committed)
+        QTest.keyClick(window.prompt_input, Qt.Key.Key_Return)
+        self.assertEqual(len(actions), 1)
+        self.assertIn(text, actions[0][2])
+
+    def test_api_origin_change_requires_new_key_or_explicit_removal(self):
+        self.config.set("api.api_key_encrypted", "saved-encrypted-key")
+        before = self.config.get_all()
+        disk_before = self.config.config_path.read_bytes()
+        for endpoint in ("https://other.example/v1", "http://api.openai.com/v1",
+                         "https://api.openai.com:8443/v1"):
+            self.window.input_base_url.setText(endpoint)
+            self.window._on_save()
+            self.assertEqual(self.window.result(), 0)
+            self.assertEqual(self.config.get_all(), before)
+            self.assertEqual(self.config.config_path.read_bytes(), disk_before)
+
+    def test_equivalent_api_origin_and_path_edits_keep_saved_key(self):
+        self.config.set("api.api_key_encrypted", "saved-encrypted-key")
+        self.window.input_base_url.setText("HTTPS://API.OPENAI.COM:443/another/path/")
+        self.window._on_save()
+        self.assertEqual(self.window.result(), 1)
+        self.assertEqual(self.config.get("api.api_key_encrypted"), "saved-encrypted-key")
+
+    def test_api_origin_change_can_remove_saved_key(self):
+        self.config.set("api.api_key_encrypted", "saved-encrypted-key")
+        self.window.input_base_url.setText("http://localhost:11434/v1")
+        self.window.clear_api_key.setChecked(True)
+        self.window._on_save()
+        self.assertEqual(self.window.result(), 1)
+        self.assertEqual(self.config.get("api.api_key_encrypted"), "")
+
+    def test_api_origin_change_can_save_explicit_new_key(self):
+        self.config.set("api.api_key_encrypted", "saved-encrypted-key")
+        self.window.input_base_url.setText("https://other.example/v1")
+        self.window.input_api_key.setText("replacement-key")
+        with patch.object(self.config.crypto, "encrypt", return_value="new-encrypted-key"), \
+             patch.object(self.config, "set_api_key", wraps=self.config.set_api_key) as save_key:
+            self.window._on_save()
+        save_key.assert_called_once_with("replacement-key")
+        self.assertEqual(self.window.result(), 1)
+        self.assertEqual(self.config.get("api.api_key_encrypted"), "new-encrypted-key")
+
+    def test_api_origin_change_without_saved_key_needs_no_confirmation(self):
+        self.window.input_base_url.setText("http://localhost:11434/v1")
+        self.window._on_save()
+        self.assertEqual(self.window.result(), 1)
+
+    def test_long_action_names_fit_after_button_resize_and_font_change(self):
+        window = PopupWindow()
+        self.addCleanup(window.close)
+        window.show_at_position(0, 0, "selected text")
+        name = "A deliberately long saved prompt name " * 10
+        window.set_prompt_names({"rewrite": name})
+        self.app.processEvents()
+        button = window.btn_rewrite
+        self.assertEqual(button.toolTip(), f"<span>{name}</span>")
+        self.assertLess(len(button.text()), len(name))
+        button.resize(80, button.height())
+        narrow = button.text()
+        button.resize(220, button.height())
+        self.assertGreater(len(button.text()), len(narrow))
+        larger_font = button.font()
+        larger_font.setPixelSize(32)
+        button.setFont(larger_font)
+        self.assertLessEqual(button.fontMetrics().horizontalAdvance(button.text()), button.width())
+        self.assertEqual(button.toolTip(), f"<span>{name}</span>")
+        self.assertEqual(window.width(), 280)
 
     def runtime_hotkeys(self):
         manager = Mock(hotkey=self.config.get('hotkey.key'),

@@ -2,7 +2,9 @@
 
 import base64
 import json
+import logging
 import tempfile
+import traceback
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -10,7 +12,7 @@ from unittest.mock import patch
 
 import httpx
 
-from core.ai_provider import OAICompatibleProvider, validate_api_url
+from core.ai_provider import APIProviderError, OAICompatibleProvider, validate_api_url
 from core.chatml_parser import ChatMLParser
 from core.config_manager import ConfigManager
 from core.crypto_manager import CryptoManager
@@ -48,6 +50,37 @@ class ParserTests(unittest.TestCase):
     def test_malformed_later_block_is_not_silently_discarded(self):
         with self.assertRaises(ValueError):
             ChatMLParser.parse("<|im_start|>user\nHello<|im_end|><|im_start|>bad-header")
+
+    def test_chatml_rejects_instructions_outside_message_blocks(self):
+        block = "<|im_start|>user\n{{text}}<|im_end|>"
+        for template in (
+            "Translate to Korean.\n" + block,
+            block + "\nTranslate to Korean.",
+            block + "\nTranslate to Korean.\n" + block,
+        ):
+            with self.subTest(template=template), self.assertRaisesRegex(ValueError, "inside a message block"):
+                ChatMLParser.parse_and_substitute(template, {"text": "Example"})
+
+    def test_chatml_keeps_optional_end_tags_and_unrestricted_role_names(self):
+        for separator, ending in (("", ""), ("<|im_end|>\r\n", "<|im_end|>"), ("", "<|im_end|>")):
+            template = " \t<|im_start|>custom_role\r\nfirst" + separator
+            template += "<|im_start|>user\nsecond" + ending + "\r\n "
+            with self.subTest(separator=separator, ending=ending):
+                self.assertEqual(ChatMLParser.parse(template), [
+                    {"role": "custom_role", "content": "first"},
+                    {"role": "user", "content": "second"},
+                ])
+
+    def test_bundled_templates_parse_without_changes(self):
+        prompts_path = Path(__file__).resolve().parents[1] / "resources" / "default_prompts.json"
+        prompts = json.loads(prompts_path.read_text(encoding="utf-8"))
+        for key, prompt in prompts.items():
+            with self.subTest(key=key):
+                messages = ChatMLParser.parse_and_substitute(
+                    prompt["template"], {"text": "Example", "instruction": "Translate"}
+                )
+                self.assertTrue(messages)
+                self.assertIn("Example", messages[-1]["content"])
 
 
 class StorageTests(unittest.TestCase):
@@ -115,6 +148,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(self.config.get_all(), before)
         self.assertEqual(self.config.load(), before)
 
+    def test_recovering_settings_preserves_the_unreadable_original(self):
+        original = b'{"incomplete":'
+        self.config.config_path.write_bytes(original)
+        self.config.create_default_config(base_url="http://localhost/v1", model="local-model")
+        backups = list(self.config.config_path.parent.glob("config.json.*.bak"))
+        self.assertEqual([path.read_bytes() for path in backups], [original])
+        self.assertEqual(self.config.load()["api"]["model"], "local-model")
+
     def test_configuration_requires_valid_url_and_nonblank_model(self):
         self.config.save({"api": {"base_url": "file:///tmp/x", "model": "m"}})
         self.assertFalse(self.config.is_configured())
@@ -155,6 +196,36 @@ class PromptTests(unittest.TestCase):
         self.manager.load()
         self.assertEqual(self.manager.get_prompt_info("edit")["name"], "Edit")
         self.assertIn("valid", self.manager.get_prompt_keys())
+
+    def test_prompt_changes_preserve_unreadable_and_rejected_original_files(self):
+        for original in (b'{"incomplete":', b'{"edit":{"name":"Legacy","template":""}}'):
+            with self.subTest(original=original):
+                self.user.write_bytes(original)
+                self.manager.load()
+                self.assertTrue(self.manager.has_unreadable_overrides)
+                self.manager.update_prompt("edit", name="Changed")
+                self.manager.save()
+                backups = list(self.user.parent.glob("user.json.*.bak"))
+                self.assertIn(original, [path.read_bytes() for path in backups])
+                self.assertEqual(json.loads(self.user.read_text(encoding="utf-8"))["edit"]["name"], "Changed")
+
+    def test_huge_invalid_temperature_does_not_discard_valid_overrides(self):
+        self.user.write_text(json.dumps({
+            "edit": {"name": "Invalid", "template": "{{text}}", "temperature": 10**1000},
+            "valid": {"name": "Valid", "template": "{{text}}", "temperature": 1},
+        }), encoding="utf-8")
+        self.manager.load()
+        self.assertEqual(self.manager.get_prompt_info("edit")["name"], "Edit")
+        self.assertIn("valid", self.manager.get_prompt_keys())
+
+    def test_temperature_range_rejects_huge_and_nonfinite_numbers(self):
+        before = self.manager.get_prompt_info("edit")
+        for temperature in (10**1000, -(10**1000), float("inf"), float("-inf"), float("nan"), True, "1"):
+            with self.subTest(temperature_type=type(temperature).__name__):
+                with self.assertRaises(ValueError):
+                    self.manager.update_prompt("edit", temperature=temperature)
+                self.assertEqual(self.manager.get_prompt_info("edit"), before)
+                self.assertFalse(self.manager.is_user_modified("edit"))
 
     def test_invalid_root_override_falls_back_to_defaults(self):
         self.user.write_text("[]", encoding="utf-8")
@@ -207,6 +278,47 @@ class ProviderTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     provider.complete([])
 
+    def test_malformed_or_nontext_completion_status_cannot_replace_selected_text(self):
+        for finish_reason in (False, 0, 1, [], {}, "tool_calls", "function_call", "refusal", "refused"):
+            with self.subTest(finish_reason=finish_reason):
+                provider = self.make_provider(lambda request: httpx.Response(200, json={
+                    "choices": [{"finish_reason": finish_reason, "message": {"content": "partial answer"}}]
+                }))
+                with self.assertRaises(APIProviderError):
+                    provider.complete([])
+
+    def test_refusal_cannot_replace_selection_even_when_content_is_present(self):
+        private_refusal = "PRIVATE_REFUSAL_SENTINEL"
+        provider = self.make_provider(lambda request: httpx.Response(200, json={
+            "choices": [{"finish_reason": "stop", "message": {
+                "content": "partial answer", "refusal": private_refusal,
+            }}]
+        }))
+        with self.assertRaisesRegex(APIProviderError, "refused") as captured:
+            provider.complete([])
+        self.assertNotIn(private_refusal, str(captured.exception))
+
+    def test_tool_call_cannot_replace_selection_when_finish_status_says_stop(self):
+        for field, value in (("tool_calls", [{"type": "function"}]), ("function_call", {"name": "lookup"})):
+            with self.subTest(field=field):
+                provider = self.make_provider(lambda request: httpx.Response(200, json={
+                    "choices": [{"finish_reason": "stop", "message": {
+                        "content": "Let me check", field: value,
+                    }}]
+                }))
+                with self.assertRaisesRegex(APIProviderError, "requested a tool"):
+                    provider.complete([])
+
+    def test_provider_specific_text_completion_status_remains_supported(self):
+        for finish_reason in (None, "stop", "end_turn"):
+            with self.subTest(finish_reason=finish_reason):
+                provider = self.make_provider(lambda request: httpx.Response(200, json={
+                    "choices": [{"finish_reason": finish_reason, "message": {
+                        "content": "edited", "refusal": None,
+                    }}]
+                }))
+                self.assertEqual(provider.complete([]), "edited")
+
     def test_stream_model_and_messages_cannot_be_overridden(self):
         provider = self.make_provider(lambda request: self.fail("Must not make a request"))
         for params in ({"stream": True}, {"model": "other"}, {"messages": []}, []):
@@ -220,6 +332,56 @@ class ProviderTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, r"API error \(401\)"):
                     provider.complete([])
 
+    def test_http_errors_never_expose_server_text_in_display_or_traceback_logs(self):
+        private_text = "PRIVATE_SELECTED_TEXT_SENTINEL"
+        response_bodies = (
+            {"error": {"message": private_text}}, {"error": private_text},
+            [private_text], None,
+        )
+        for status in (400, 401, 403, 404, 408, 413, 422, 429, 499, 503):
+            for body in response_bodies:
+                with self.subTest(status=status, body=body):
+                    def handler(request):
+                        options = {"json": body} if body is not None else {"text": private_text}
+                        return httpx.Response(
+                            status, extensions={"reason_phrase": private_text.encode("ascii")}, **options
+                        )
+                    provider = self.make_provider(handler)
+                    with self.assertLogs("core.ai_provider", level="WARNING") as captured:
+                        try:
+                            provider.complete([])
+                        except APIProviderError as exc:
+                            error = str(exc)
+                            rendered = "".join(traceback.format_exception(exc))
+                            logging.getLogger("core.ai_provider").exception("Failed request")
+                        else:
+                            self.fail("Expected an APIProviderError")
+                    self.assertIn(f"API error ({status})", error)
+                    self.assertNotIn(private_text, error)
+                    self.assertNotIn(private_text, rendered)
+                    self.assertNotIn(private_text, "\n".join(captured.output))
+
+    def test_transport_errors_do_not_leak_private_exception_details(self):
+        private_text = "PRIVATE_TRANSPORT_DETAIL_SENTINEL"
+        for exception_class in (httpx.ReadTimeout, httpx.ConnectError):
+            with self.subTest(exception_class=exception_class):
+                def handler(request):
+                    raise exception_class(private_text, request=request)
+                provider = self.make_provider(handler)
+                try:
+                    provider.complete([])
+                except APIProviderError as exc:
+                    self.assertNotIn(private_text, str(exc))
+                    self.assertNotIn(private_text, "".join(traceback.format_exception(exc)))
+                else:
+                    self.fail("Expected an APIProviderError")
+
+    def test_http_status_messages_remain_actionable(self):
+        expected = {401: "API key", 404: "Base URL", 413: "less text", 429: "quota", 503: "later"}
+        for status, hint in expected.items():
+            with self.subTest(status=status):
+                self.assertIn(hint, OAICompatibleProvider._http_error_message(status))
+
     def test_timeout_is_actionable(self):
         def timeout(request):
             raise httpx.ReadTimeout("timed out", request=request)
@@ -231,6 +393,61 @@ class ProviderTests(unittest.TestCase):
         provider.close()
         provider.close()
         self.assertFalse(provider.is_configured())
+
+    def test_equivalent_settings_reuse_the_same_open_http_client(self):
+        provider = OAICompatibleProvider()
+        self.addCleanup(provider.close)
+        client_type = httpx.Client
+        def make_client(**kwargs):
+            return client_type(**kwargs, transport=httpx.MockTransport(
+                lambda request: self.fail("Reconfiguring must not send an API request")
+            ))
+        with patch("core.ai_provider.httpx.Client", side_effect=make_client) as constructor:
+            provider.configure(" https://example.test/v1/ ", "synthetic-key", " test-model ")
+            original = provider.client
+            provider.configure("https://example.test/v1", "synthetic-key", "test-model")
+            provider.configure(" https://example.test/v1/// ", "synthetic-key", " test-model ")
+            self.assertIs(provider.client, original)
+            self.assertFalse(original.is_closed)
+            self.assertEqual(constructor.call_count, 1)
+
+    def test_changed_settings_and_closed_clients_create_a_new_pool(self):
+        provider = OAICompatibleProvider()
+        self.addCleanup(provider.close)
+        client_type = httpx.Client
+        with patch("core.ai_provider.httpx.Client", side_effect=lambda **kwargs: client_type(
+            **kwargs, transport=httpx.MockTransport(lambda request: self.fail("No request expected"))
+        )):
+            provider.configure("https://example.test/v1", "synthetic-key", "first-model")
+            for base_url, key, model in (
+                ("https://example.test/v1", "synthetic-key", "second-model"),
+                ("https://example.test/v1", "new-synthetic-key", "second-model"),
+                ("https://other.test/v1", "new-synthetic-key", "second-model"),
+            ):
+                previous = provider.client
+                provider.configure(base_url, key, model)
+                self.assertIsNot(provider.client, previous)
+                self.assertTrue(previous.is_closed)
+                self.assertTrue(provider.is_configured())
+                self.assertEqual(provider.model, model)
+            previous = provider.client
+            provider.close()
+            provider.configure(base_url, key, model)
+            self.assertIsNot(provider.client, previous)
+            self.assertTrue(previous.is_closed)
+            self.assertTrue(provider.is_configured())
+            # A client closed externally must also be recreated with unchanged settings.
+            previous = provider.client
+            previous.close()
+            provider.configure(base_url, key, model)
+            self.assertIsNot(provider.client, previous)
+            self.assertTrue(provider.is_configured())
+            previous = provider.client
+            provider.timeout = 5.0
+            provider.configure(base_url, key, model)
+            self.assertIsNot(provider.client, previous)
+            self.assertTrue(previous.is_closed)
+            self.assertEqual(provider.client.timeout, httpx.Timeout(5.0))
 
     def test_invalid_new_config_preserves_working_client(self):
         provider = self.make_provider(lambda request: httpx.Response(200))

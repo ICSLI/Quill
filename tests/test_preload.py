@@ -14,6 +14,49 @@ class PreloadTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_shortcuts_do_not_recapture_text_while_popup_is_open(self):
+        self.run_script('''
+            import tempfile
+            from pathlib import Path
+            from unittest.mock import patch
+            from app.application import QuillApp
+            from core.config_manager import ConfigManager
+            from core.prompt_manager import PromptManager
+
+            with tempfile.TemporaryDirectory() as folder:
+                config = ConfigManager(str(Path(folder) / 'config.json'))
+                config.create_default_config()
+                config.save()
+                prompts = PromptManager(user_prompts_path=str(Path(folder) / 'prompts.json'))
+                with patch('app.application.ConfigManager', return_value=config), \
+                     patch('app.application.PromptManager', return_value=prompts), \
+                     patch('app.application.OAICompatibleProvider'), \
+                     patch('app.application.HotkeyManager'), \
+                     patch('app.application.TrayManager'):
+                    app = QuillApp([])
+                    try:
+                        capture = app.text_processor.text_extracted
+                        with patch.object(app.text_processor, 'extract_selected_text',
+                                          side_effect=lambda: capture.emit('selected text')) as extract:
+                            app._on_hotkey_pressed(0, 0)
+                            popup = app.popup_window
+                            assert popup.isVisible()
+                            popup.prompt_input.setPlainText('unsent instruction')
+
+                            app._on_hotkey_pressed(0, 0)
+                            app._on_quick_hotkey_pressed(0, 0)
+                            extract.assert_called_once()
+                            assert popup.prompt_input.toPlainText() == 'unsent instruction'
+                            assert popup.selected_text == 'selected text'
+
+                            popup.close()
+                            app._on_hotkey_pressed(0, 0)
+                            assert extract.call_count == 2
+                            assert popup.isVisible()
+                    finally:
+                        app._cleanup()
+        ''')
+
     def test_render_failure_keeps_normal_popup_and_settings_available(self):
         self.run_script('''
             import tempfile
@@ -32,9 +75,14 @@ class PreloadTests(unittest.TestCase):
                      patch('app.application.OAICompatibleProvider'), \
                      patch('app.application.HotkeyManager'), \
                      patch('app.application.TrayManager'), \
-                     patch('app.application.prepare_hidden_window', side_effect=RuntimeError('render unavailable')):
+                     patch('app.application.prepare_hidden_window', side_effect=RuntimeError('render unavailable')) as prepare:
                     app = QuillApp([])
                     assert app.popup_window is not None
+                    # Opening before the timer fires should not warm up Settings in the foreground path.
+                    app._show_settings()
+                    assert app.settings_window.isVisible()
+                    prepare.assert_called_once_with(app.popup_window)
+                    app.settings_window.reject()
                     app._ui_preload_timer.stop()
                     app._preload_windows()
                     settings = app.settings_window

@@ -7,13 +7,13 @@ Inspired by [WritingTools](https://github.com/theJayTea/WritingTools), Quill sup
 ## 📥 Download
 
 - [Latest stable release](https://github.com/ICSLI/Quill/releases/latest)
-- [Quill v1.0.12 pre-release](https://github.com/ICSLI/Quill/releases/tag/v1.0.12) — includes hidden popup/Settings preloading and local diagnostics. Login-time hotkey verification is still pending, and the reported intermittent failure after a notification sound remains under investigation.
+- [Quill v1.0.14 pre-release](https://github.com/ICSLI/Quill/releases/tag/v1.0.14) — opens the popup controls before laying out the preview and improves text replacement and settings recovery.
 
 Requirements: **Windows 10/11** and access to a compatible API or running local model server.
 
-The instructions below describe v1.0.12. Older releases may differ.
+The instructions below describe v1.0.14. Check the release notes for changes available in each download.
 
-1. Download the Windows ZIP attached to the chosen release, such as `Quill-v1.0.12-windows.zip`.
+1. Download the Windows ZIP attached to the chosen release, such as `Quill-v1.0.14-windows.zip`.
 2. Extract the entire archive to a writable folder.
 3. Run `Quill.exe`. Keep `_internal` beside it; the executable is not a standalone file.
 
@@ -39,7 +39,7 @@ Quill uses non-streaming **Chat Completions** and expects text in `choices[0].me
 3. Choose a quick action, or type a custom instruction and press **Enter** or click **Send**.
 4. Keep the source window and selection available until the response is ready.
 
-Before pasting, Quill checks that the source window is in the foreground and the selected text still matches. If those checks fail, it leaves the target untouched and offers the response for manual copying. Empty responses and responses marked as truncated or filtered by the API are rejected.
+Before pasting, Quill checks that the source window is in the foreground and the selected text still matches. It also checks the original input field when Windows identifies it. If a check fails, Quill leaves the target untouched and offers the response for manual copying. Empty responses and responses marked as truncated or filtered by the API are rejected.
 
 ### Quick Actions
 
@@ -80,7 +80,7 @@ Opening Settings uses the prepared window. Opening it again while it is visible 
 
 Open **Settings** from the system tray:
 
-- **API** — Base URL, API key, model, and Additional Params. Leave the key field empty to keep the saved key; select **Remove saved API key** to remove it.
+- **API** — Base URL, API key, model, and Additional Params. Leave the key field empty to keep the saved key for the same server. When switching servers, enter that server's key or select **Remove saved API key** if it does not need one.
 - **Hotkeys** — Main and Quick Repeat shortcuts. Clear Quick Repeat to disable that shortcut. When Quill is active, changed shortcuts are registered before saving; a conflict keeps the previous settings. Changes saved while paused take effect on Resume.
 - **Prompts** — Edit existing prompt names, templates, and temperatures. The Custom prompt's name is fixed. Switching prompts retains drafts; **Cancel** discards them. **Reset to Default** is also a draft until **Save** is clicked.
 
@@ -165,7 +165,7 @@ Verify the provider's Base URL, model ID, authentication, quota, and accepted pa
 
 ### Response Is Not Pasted
 
-The target must support copy/paste. Return to the original window with the original text selected. A failed source-window or selection check blocks automatic replacement; use **Copy Response** in the error dialog to paste manually.
+The target must allow pasting into the selected field. Return to the original window with the original text selected. For read-only text or a failed replacement, use **Copy Last Response** from the Quill tray menu to paste the latest result elsewhere. Quill keeps that result in memory until the next response or until you quit.
 
 ### Failure After a Notification Sound
 
@@ -173,11 +173,12 @@ The reported intermittent symptom is still under investigation. Since v1.0.12, l
 
 Open `%LOCALAPPDATA%\Quill\logs\events.log`. Records contain fixed event names, counts, flags, and redacted code locations. Selected text, prompts, API responses, and credentials are excluded. Logs rotate at 256 KiB and keep two backups; Quill does not upload them.
 
-Useful events include `hotkey.received`, `selection.copy_timed_out`, `ai.started`, `ai.completed`, `replacement.completed`, `dialog.opened`, and `dialog.closed`. Check for an open Quill dialog before restarting. When reporting a failure, include the Quill version, affected application, failed step, and relevant event sequence.
+Useful events include `hotkey.received`, `selection.copy_timed_out`, `ai.started`, `ai.completed`, `replacement.sent`, `dialog.opened`, and `dialog.closed`. `replacement.sent` confirms that Windows accepted the paste input. Check the target application to confirm that the text changed. `ui.popup_shown` measures the window opening, and `ui.preview_updated` measures the preview separately. When reporting a failure, include the Quill version, affected application, failed step, and relevant event sequence.
 
 ### Known Limitations
 
-- Clipboard restoration preserves **plain text only**. Previously copied formatting, images, and other formats may be lost from the clipboard; source files are not deleted.
+- Clipboard restoration during selection capture preserves **plain text only**. Previously copied formatting and images may be lost from the clipboard. After sending paste input, Quill leaves the generated text on the clipboard so a slow application can still read it.
+- Quill blocks simulated copy and paste in recognized Windows terminal windows, where Ctrl+C can interrupt a running command.
 - Settings and prompts are saved to separate files. Abrupt termination between writes can leave only part of a settings change saved.
 - Application compatibility, Korean IME, multi-monitor behavior, and login-time shortcuts require manual checks in the target environment. Passing automated tests does not establish compatibility with every application.
 

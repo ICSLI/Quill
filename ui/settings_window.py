@@ -7,6 +7,7 @@ API 설정, 단축키 설정 등을 관리합니다.
 import json
 import logging
 from copy import deepcopy
+from urllib.parse import urlsplit
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QGroupBox, QFormLayout,
@@ -16,11 +17,17 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal
 
 from ui.styles import apply_dark_theme
-from core.ai_provider import validate_api_url, RESERVED_PARAMS
+from core.ai_provider import validate_api_key, validate_api_url, RESERVED_PARAMS
 from app.hotkey_manager import validate_hotkeys
 
 
 logger = logging.getLogger(__name__)
+
+
+def _api_origin(url):
+    parsed = urlsplit(validate_api_url(url))
+    port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+    return parsed.scheme, parsed.hostname, port
 
 
 class HotkeyEdit(QLineEdit):
@@ -260,6 +267,11 @@ class SettingsWindow(QDialog):
         layout.setSpacing(16)
 
         # 프롬프트 설정 그룹
+        if self.prompt_manager.has_unreadable_overrides:
+            recovery = QLabel("Some saved prompts could not be loaded. Quill will keep a copy of the original "
+                              "prompt file in the data folder if you save prompt changes.")
+            recovery.setWordWrap(True)
+            layout.addWidget(recovery)
         prompts_group = QGroupBox("Prompt Settings")
         prompts_layout = QFormLayout()
         prompts_layout.setSpacing(12)
@@ -488,6 +500,20 @@ class SettingsWindow(QDialog):
         """Validate the entire form before changing any live settings."""
         try:
             base_url = validate_api_url(self.input_base_url.text().strip())
+            api_key = self.input_api_key.text().strip()
+            if not self.clear_api_key.isChecked():
+                validate_api_key(api_key)
+            if (self.config_manager.get("api.api_key_encrypted", "")
+                    and not api_key and not self.clear_api_key.isChecked()):
+                try:
+                    previous_origin = _api_origin(self.config_manager.get("api.base_url", ""))
+                except ValueError:
+                    previous_origin = None
+                if _api_origin(base_url) != previous_origin:
+                    raise ValueError(
+                        "The API server has changed. Enter an API key for the new server "
+                        "or select Remove saved API key before saving."
+                    )
             model = self.input_model.text().strip()
             if not model:
                 raise ValueError("Please enter a Model name.")
@@ -523,7 +549,6 @@ class SettingsWindow(QDialog):
             self.config_manager.set("api.base_url", base_url)
             self.config_manager.set("api.model", model)
             self.config_manager.set("api.additional_params", additional_params)
-            api_key = self.input_api_key.text().strip()
             if self.clear_api_key.isChecked():
                 self.config_manager.set("api.api_key_encrypted", "")
             elif api_key:

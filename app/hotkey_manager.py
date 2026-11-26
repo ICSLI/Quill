@@ -16,6 +16,9 @@ _RESERVED = [
     frozenset(keyboard.HotKey.parse('<ctrl>+<alt>+<delete>')),
     frozenset(keyboard.HotKey.parse('<ctrl>+<shift>+<esc>')),
 ]
+# RegisterHotKey also intercepts the synthetic copy/paste used by TextWorker.
+# Compare Windows specifications so numeric aliases and keyboard layouts agree.
+_CLIPBOARD_SHORTCUTS = {(2, ord('C')), (2, ord('V'))}
 
 
 def _parse_hotkey(value):
@@ -43,6 +46,8 @@ def validate_hotkeys(hotkey: str, quick_hotkey: str = ''):
     quick = _parse_hotkey(quick_hotkey) if quick_hotkey else None
     main_spec = shortcut_spec(main)
     quick_spec = shortcut_spec(quick) if quick else None
+    if main_spec in _CLIPBOARD_SHORTCUTS or quick_spec in _CLIPBOARD_SHORTCUTS:
+        raise ValueError('Ctrl+C and Ctrl+V are used by Quill to copy and replace text. Choose another shortcut.')
     if main_spec == quick_spec:
         raise ValueError('Main and quick shortcuts must be different.')
 

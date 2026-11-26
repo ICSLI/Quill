@@ -2,7 +2,7 @@
 
 ## Environment and Source Run
 
-Use Windows 10/11, Python 3.10 or newer, and a dedicated virtual environment. The v1.0.12 Windows build was packaged with Python 3.13.5.
+Use Windows 10/11, Python 3.10 or newer, and a dedicated virtual environment. The v1.0.14 Windows build was packaged with Python 3.13.5.
 
 From the repository root in PowerShell:
 

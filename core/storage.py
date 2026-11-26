@@ -2,9 +2,28 @@
 
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
+
+
+def back_up_file(path: Path) -> Path:
+    """Preserve the original bytes under a unique name before repairing a file."""
+    backup = None
+    try:
+        with path.open("rb") as source, tempfile.NamedTemporaryFile(
+            mode="wb", dir=path.parent, prefix=f"{path.name}.", suffix=".bak", delete=False,
+        ) as destination:
+            backup = Path(destination.name)
+            shutil.copyfileobj(source, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+    except OSError:
+        if backup is not None:
+            backup.unlink(missing_ok=True)
+        raise
+    return backup
 
 
 def atomic_write_json(path: Path, data: Any) -> None:

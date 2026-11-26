@@ -17,7 +17,7 @@ Windows 전용 백그라운드 AI 작문 보조 도구입니다.
 import sys
 import logging
 from pathlib import Path
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 # 참고: Qt 6 (PySide6)는 고DPI 스케일링이 기본 활성화됨
 
@@ -36,13 +36,27 @@ def setup_logging():
     logging.basicConfig(
         level=logging.INFO,  # 프로덕션: INFO, 개발: DEBUG
         format=log_format,
-        handlers=[
-            # 콘솔 출력
-            logging.StreamHandler(sys.stdout),
-            # 파일 출력 (선택적)
-            # logging.FileHandler('quill.log', encoding='utf-8')
-        ]
+        handlers=[logging.StreamHandler(sys.stdout) if sys.stdout is not None else logging.NullHandler()],
     )
+
+
+def acquire_instance_lock(lock):
+    try:
+        if lock.acquire():
+            return True
+    except OSError as exc:
+        logging.getLogger(__name__).error("Could not access the Quill data folder: %s", exc)
+        app = QApplication(sys.argv)
+        QMessageBox.critical(
+            None, "Quill Could Not Start",
+            "Quill could not access its data folder. Move Quill to a folder you can write to, then try again."
+        )
+        return False
+
+    app = QApplication(sys.argv)
+    QMessageBox.warning(None, "Quill Already Running",
+                        "Another instance of Quill is already running. Please check the system tray.")
+    return False
 
 
 def main():
@@ -56,16 +70,7 @@ def main():
     try:
         lock = SingleInstanceLock()
         # 단일 인스턴스 체크
-        if not lock.acquire():
-            logger.warning("Another instance of Quill is already running")
-            # GUI 에러 메시지 표시
-            from PySide6.QtWidgets import QApplication
-            temp_app = QApplication(sys.argv)
-            QMessageBox.warning(
-                None,
-                "Quill Already Running",
-                "Another instance of Quill is already running.\n\nPlease check the system tray."
-            )
+        if not acquire_instance_lock(lock):
             sys.exit(1)
 
         setup_diagnostics()
@@ -89,6 +94,10 @@ def main():
     except Exception as e:
         record_exception('session.failed', e.__traceback__)
         logger.error(f"Fatal error: {e}", exc_info=True)
+        app = QApplication.instance() or QApplication(sys.argv)
+        QMessageBox.critical(None, "Quill Could Not Start",
+                             "Check that you extracted the whole Quill folder and can write to it. "
+                             "See Quill's local events log for details.")
         sys.exit(1)
     finally:
         if lock is not None:

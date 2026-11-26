@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal
 
 from ui.styles import apply_dark_theme
-from core.ai_provider import validate_api_url
+from core.ai_provider import validate_api_key, validate_api_url
 
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ class OnboardingWindow(QDialog):
     # Signal: 설정 완료 시 발생 (base_url, api_key, model)
     setup_completed = Signal(str, str, str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, recovering_settings=False):
         """OnboardingWindow 초기화"""
         super().__init__(parent)
 
@@ -33,12 +33,12 @@ class OnboardingWindow(QDialog):
         self.setModal(True)
         self.setMinimumWidth(500)
 
-        self._setup_ui()
+        self._setup_ui(recovering_settings)
         apply_dark_theme(self)
 
         logger.debug("OnboardingWindow initialized")
 
-    def _setup_ui(self):
+    def _setup_ui(self, recovering_settings):
         """UI 구성"""
         layout = QVBoxLayout()
         layout.setSpacing(16)
@@ -55,6 +55,11 @@ class OnboardingWindow(QDialog):
         )
         desc_label.setWordWrap(True)
         layout.addWidget(desc_label)
+        if recovering_settings:
+            recovery = QLabel("Quill could not open your existing settings. Continuing saves new settings "
+                              "and keeps a copy of the original file in the data folder.")
+            recovery.setWordWrap(True)
+            layout.addWidget(recovery)
 
         # API 설정 그룹
         api_group = QGroupBox("API Configuration")
@@ -123,6 +128,13 @@ class OnboardingWindow(QDialog):
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid Input", str(exc))
             self.input_base_url.setFocus()
+            return
+
+        try:
+            validate_api_key(api_key)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid Input", str(exc))
+            self.input_api_key.setFocus()
             return
 
         if not model:
